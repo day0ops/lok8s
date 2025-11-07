@@ -1,6 +1,6 @@
 # lok8s
 
-A tool for provisioning local Kubernetes clusters with advanced network management capabilities.
+lok8s (short for "Local Kubernetes") is a tool for provisioning local Kubernetes clusters with advanced network management capabilities.
 
 ![demo](images/demo.png)
 
@@ -113,7 +113,7 @@ lok8s delete -p myproject -n 2 --force
 
 ### Managing Kind Tunnels
 
-The `kind-tunnel` command manages cloud-provider-kind processes for Kind clusters on macOS and Linux. On macOS, this command requires sudo privileges.
+The `kind-tunnel` command starts cloud-provider-kind background processes that enable LoadBalancer services in Kind clusters.
 
 ```bash
 # Start cloud-provider-kind processes (run the tunnel)
@@ -139,7 +139,7 @@ sudo lok8s kind-tunnel -p myproject --ports --format json
 lok8s kind-tunnel -p myproject --ports --format json
 ```
 
-**Note:** The `kind-tunnel` command starts cloud-provider-kind background processes that enable LoadBalancer services in Kind clusters. On macOS, sudo is required to access Docker privileged ports. On Linux, sudo is not required.
+**Note:** On macOS, sudo is required to access Docker privileged ports. On Linux, sudo is not required.
 
 ### Global Options
 
@@ -235,6 +235,7 @@ pkg/
 - 1.29.x
 
 ### Minikube
+- 1.34.x
 - 1.33.x
 - 1.32.x
 - Any valid semantic version (will be validated)
