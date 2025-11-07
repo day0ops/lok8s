@@ -1,0 +1,237 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  GOPROXY: https://proxy.golang.org
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    name: Lint
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed for git describe
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run linter
+        run: make lint
+
+  unit-tests:
+    needs: [lint]
+    runs-on: ubuntu-latest
+    name: Unit Tests
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed for git describe
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvirt-dev
+
+      - name: Run unit tests
+        run: |
+          go test -v -race -coverprofile=coverage.out ./pkg/...
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.out
+          flags: unittests
+          name: codecov-umbrella
+
+  build:
+    needs: [lint, unit-tests]
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux-amd64
+            build_cmd: make build-all
+            artifact_pattern: lok8s-linux-amd64*
+            artifact_name: lok8s-binaries-linux-amd64
+            checksum_name: lok8s-checksums-linux-amd64
+            install_deps: |
+              sudo apt-get update
+              sudo apt-get install -y libvirt-dev
+          - runner: macos-latest
+            platform: darwin
+            build_cmd: make build-darwin
+            artifact_pattern: lok8s-darwin-*
+            artifact_name: lok8s-binaries-darwin
+            checksum_name: lok8s-checksums-darwin
+            install_deps: ""
+    runs-on: ${{ matrix.runner }}
+    name: Build ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed for git describe
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        if: matrix.install_deps != ''
+        run: ${{ matrix.install_deps }}
+
+      - name: Build binaries
+        run: ${{ matrix.build_cmd }}
+
+      - name: List built binaries
+        run: ls -la _output/binaries/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: _output/binaries/${{ matrix.artifact_pattern }}
+          retention-days: 30
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.checksum_name }}
+          path: _output/binaries/${{ matrix.artifact_pattern }}.sha256sum
+          retention-days: 30
+
+  build-linux-arm64:
+    needs: [lint, unit-tests]
+    runs-on: ubuntu-24.04-arm
+    name: Build linux ARM64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed for git describe
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvirt-dev gcc make git
+
+      - name: Build linux arm64
+        run: make build-linux-arm64
+
+      - name: List built binaries
+        run: ls -la _output/binaries/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lok8s-binaries-arm64
+          path: _output/binaries/lok8s-linux-arm64*
+          retention-days: 30
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: lok8s-checksums-arm64
+          path: _output/binaries/lok8s-linux-arm64*.sha256sum
+          retention-days: 30
+
+  release:
+    needs: [lint, unit-tests, build, build-linux-arm64]
+    runs-on: ubuntu-latest
+    name: Create Release
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts (linux-amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: lok8s-binaries-linux-amd64
+          path: ./binaries
+
+      - name: Download build artifacts (linux-arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: lok8s-binaries-arm64
+          path: ./binaries
+
+      - name: Download build artifacts (darwin)
+        uses: actions/download-artifact@v4
+        with:
+          name: lok8s-binaries-darwin
+          path: ./binaries
+
+      - name: Download checksums (linux-amd64)
+        uses: actions/download-artifact@v4
+        with:
+          name: lok8s-checksums-linux-amd64
+          path: ./binaries
+
+      - name: Download checksums (linux-arm64)
+        uses: actions/download-artifact@v4
+        with:
+          name: lok8s-checksums-arm64
+          path: ./binaries
+
+      - name: Download checksums (darwin)
+        uses: actions/download-artifact@v4
+        with:
+          name: lok8s-checksums-darwin
+          path: ./binaries
+
+      - name: List all binaries
+        run: ls -la ./binaries/
+
+      - name: Extract version
+        id: version
+        run: |
+          # Get the tag name from the ref that triggered the workflow
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
+          # Get the version without 'v' prefix for display
+          VERSION=${TAG_NAME#v}
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          # Check if this is a prerelease (contains '-')
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "PRERELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "PRERELEASE=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "lok8s ${{ steps.version.outputs.VERSION }}"
+          tag_name: ${{ steps.version.outputs.TAG_NAME }}
+          files: |
+            binaries/lok8s-*
+          draft: false
+          prerelease: ${{ steps.version.outputs.PRERELEASE == 'true' }}
+          generate_release_notes: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
