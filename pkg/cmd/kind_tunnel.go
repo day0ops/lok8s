@@ -101,6 +101,25 @@ Use this command to:
 	return cmd
 }
 
+// checkExistingCloudProviderProcesses checks if there are any existing cloud-provider-kind processes running
+func checkExistingCloudProviderProcesses(manager *services.CloudProviderKindManager) error {
+	hasExisting, processes, err := manager.HasExistingProcesses()
+	if err != nil {
+		return fmt.Errorf("failed to check for existing processes: %w", err)
+	}
+
+	if hasExisting {
+		logger.Warnf("⚠️  existing cloud-provider-kind process(es) detected:")
+		for _, process := range processes {
+			logger.Warnf("   - context: %s, PID: %d", process.ContextName, process.PID)
+		}
+		logger.Warnf("⚠️  please terminate existing processes using 'lok8s kind-tunnel -p <project> --terminate' before starting new ones")
+		return fmt.Errorf("existing cloud-provider-kind processes are running")
+	}
+
+	return nil
+}
+
 // startCloudProviderProcesses starts cloud-provider-kind processes for the specified project
 func startCloudProviderProcesses(project string) error {
 	logger.Infof("starting cloud-provider-kind processes for project %s", project)
@@ -118,6 +137,11 @@ func startCloudProviderProcesses(project string) error {
 	}
 
 	cloudProviderManager := services.NewCloudProviderKindManager()
+
+	// check if there are any existing cloud-provider-kind processes running
+	if err := checkExistingCloudProviderProcesses(cloudProviderManager); err != nil {
+		return err
+	}
 
 	// start cloud-provider-kind for each cluster
 	var contextName string
@@ -144,8 +168,7 @@ func startCloudProviderProcesses(project string) error {
 
 	logger.Infof("🎉 cloud-provider-kind processes started for project %s", project)
 
-	// automatically show ports after starting processes
-	return showLoadBalancerPorts(project, savedConfig.NumClusters, "table")
+	return nil
 }
 
 // terminateCloudProviderProcesses terminates cloud-provider-kind processes for the specified project

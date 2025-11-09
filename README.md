@@ -78,8 +78,6 @@ lok8s create -p myproject -n 1
 lok8s create -p myproject -n 2 \
   --cpu 4 \
   --memory 8GiB \
-  --bridge virbr50 \
-  --subnet-cidr 10.89.0.1/16 \
   --nodes 3
 
 # Create Kind clusters
@@ -88,8 +86,6 @@ lok8s create -p myproject -n 1 --environment kind
 # Create multiple Kind clusters with custom networking
 lok8s create -p myproject -n 3 \
   --environment kind \
-  --gateway-ip 10.89.0.1 \
-  --subnet-cidr 10.89.0.0/16 \
   --nodes 2 \
   --kubernetes-version 1.31
 
