@@ -411,6 +411,22 @@ func (cpkm *CloudProviderKindManager) verifyProcessRunning(pid int) error {
 	return nil
 }
 
+// HasExistingProcesses checks if there are any existing cloud-provider-kind processes in the cache
+func (cpkm *CloudProviderKindManager) HasExistingProcesses() (bool, []CloudProviderProcess, error) {
+	if err := cpkm.processCache.loadProcessCache(); err != nil {
+		logger.Debugf("failed to load process cache: %v", err)
+		return false, nil, nil
+	}
+
+	var processes []CloudProviderProcess
+	for contextName, process := range cpkm.processCache.Processes {
+		processes = append(processes, process)
+		logger.Debugf("found cloud-provider-kind process entry for context %s (PID: %d)", contextName, process.PID)
+	}
+
+	return len(processes) > 0, processes, nil
+}
+
 // Terminate terminates a cloud-provider-kind process for the given context
 func (cpkm *CloudProviderKindManager) Terminate(contextName string, skipOsCheck bool) error {
 	if config.IsDarwin() && !skipOsCheck {
