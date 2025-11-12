@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/day0ops/lok8s/pkg/config"
 	"github.com/day0ops/lok8s/pkg/logger"
@@ -73,6 +74,19 @@ type DeleteOptions struct {
 	Project     string
 	NumClusters int
 	Force       bool
+}
+
+// StatusOptions contains options for checking kind cluster status
+type StatusOptions struct {
+	Project     string
+	NumClusters int
+}
+
+// LoadImageOptions contains options for loading images into kind clusters
+type LoadImageOptions struct {
+	Project     string
+	Image       string
+	NumClusters int
 }
 
 // getAvailablePortPrefix finds an available port prefix in the 70XX range, if not search for an available port
@@ -290,6 +304,193 @@ func (m *Manager) DeleteClusters(opts *DeleteOptions) error {
 	}
 
 	logger.Infof("successfully deleted %d Kind cluster(s)", opts.NumClusters)
+	return nil
+}
+
+// StatusClusters shows the status of kind clusters
+func (m *Manager) StatusClusters(opts *StatusOptions) error {
+	logger.Infof("-----> 📊 checking status of %d Kind cluster(s) for project %s <-----", opts.NumClusters, opts.Project)
+
+	// get list of existing kind clusters
+	existingClusters, err := m.provider.List()
+	if err != nil {
+		return fmt.Errorf("failed to list kind clusters: %w", err)
+	}
+
+	// create a map of existing cluster names for quick lookup
+	clusterMap := make(map[string]bool)
+	for _, clusterName := range existingClusters {
+		clusterMap[clusterName] = true
+	}
+
+	// prepare table data
+	type clusterStatus struct {
+		clusterName string
+		contextName string
+		status      string
+		ip          string
+	}
+
+	var statuses []clusterStatus
+
+	for i := 1; i <= opts.NumClusters; i++ {
+		var clusterName, contextName string
+		if opts.NumClusters == 1 {
+			// if only one cluster, don't add suffix
+			clusterName = "kind1"
+			contextName = opts.Project
+		} else {
+			clusterName = fmt.Sprintf("kind%d", i)
+			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
+		}
+
+		// check if cluster exists
+		if !clusterMap[clusterName] {
+			statuses = append(statuses, clusterStatus{
+				clusterName: clusterName,
+				contextName: contextName,
+				status:      "Not Found",
+				ip:          "N/A",
+			})
+			continue
+		}
+
+		// get cluster IP
+		ip := "N/A"
+		clusterIP, err := m.getKindClusterIP(clusterName)
+		if err == nil {
+			ip = clusterIP
+		}
+
+		// check if cluster is ready by trying to get nodes
+		status := "Running"
+		clientManager, err := k8s.NewClientManagerForContext(contextName)
+		if err != nil {
+			status = "Not Ready (kubeconfig issue)"
+		} else {
+			nodes, err := clientManager.GetClientset().CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+			if err != nil {
+				status = "Not Ready (API server not responding)"
+			} else if len(nodes.Items) == 0 {
+				status = "Not Ready (no nodes found)"
+			} else {
+				// check if all nodes are ready
+				allReady := true
+				for _, node := range nodes.Items {
+					for _, condition := range node.Status.Conditions {
+						if condition.Type == "Ready" && condition.Status != "True" {
+							allReady = false
+							break
+						}
+					}
+					if !allReady {
+						break
+					}
+				}
+				if !allReady {
+					status = "Not Ready (nodes not ready)"
+				}
+			}
+		}
+
+		statuses = append(statuses, clusterStatus{
+			clusterName: clusterName,
+			contextName: contextName,
+			status:      status,
+			ip:          ip,
+		})
+	}
+
+	// print table
+	fmt.Printf("\nProject: %s\n\n", opts.Project)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "CLUSTER\tCONTEXT\tSTATUS\tIP")
+	fmt.Fprintln(w, "-------\t-------\t------\t---")
+
+	for _, s := range statuses {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.clusterName, s.contextName, s.status, s.ip)
+	}
+
+	w.Flush()
+	return nil
+}
+
+// ListClusters lists all kind clusters using the SDK
+func (m *Manager) ListClusters() error {
+	logger.Info("📋 Kind clusters:")
+
+	clusters, err := m.provider.List()
+	if err != nil {
+		return fmt.Errorf("failed to list kind clusters: %w", err)
+	}
+
+	if len(clusters) == 0 {
+		fmt.Println("No Kind clusters found.")
+		return nil
+	}
+
+	for _, clusterName := range clusters {
+		fmt.Printf("  %s\n", clusterName)
+	}
+
+	return nil
+}
+
+// LoadImage loads a Docker image into kind clusters
+func (m *Manager) LoadImage(opts *LoadImageOptions) error {
+	logger.Infof("-----> 📦 loading image %s into %d Kind cluster(s) for project %s <-----", opts.Image, opts.NumClusters, opts.Project)
+
+	// check if kind binary is available
+	kindPath, err := exec.LookPath("kind")
+	if err != nil {
+		return fmt.Errorf("kind binary not found in PATH: %w", err)
+	}
+
+	for i := 1; i <= opts.NumClusters; i++ {
+		var clusterName string
+		if opts.NumClusters == 1 {
+			// if only one cluster, don't add suffix
+			clusterName = "kind1"
+		} else {
+			clusterName = fmt.Sprintf("kind%d", i)
+		}
+
+		// verify cluster exists using SDK
+		existingClusters, err := m.provider.List()
+		if err != nil {
+			return fmt.Errorf("failed to list kind clusters: %w", err)
+		}
+
+		clusterExists := false
+		for _, existingCluster := range existingClusters {
+			if existingCluster == clusterName {
+				clusterExists = true
+				break
+			}
+		}
+
+		if !clusterExists {
+			logger.Warnf("cluster %s not found, skipping image load", clusterName)
+			continue
+		}
+
+		status := logger.NewStatus()
+		status.Start(fmt.Sprintf("loading image %s into cluster %s (%d/%d)", opts.Image, clusterName, i, opts.NumClusters))
+
+		cmd := exec.Command(kindPath, "load", "docker-image", opts.Image, "--name", clusterName)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			status.End(false)
+			return fmt.Errorf("failed to load image %s into cluster %s: %w", opts.Image, clusterName, err)
+		}
+
+		status.End(true)
+		logger.Infof("✓ successfully loaded image %s into cluster %s", opts.Image, clusterName)
+	}
+
+	logger.Infof("🎉 successfully loaded image %s into %d Kind cluster(s)", opts.Image, opts.NumClusters)
 	return nil
 }
 
