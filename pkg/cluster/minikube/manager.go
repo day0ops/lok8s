@@ -24,12 +24,16 @@ package minikube
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/day0ops/lok8s/pkg/config"
 	"github.com/day0ops/lok8s/pkg/logger"
@@ -81,6 +85,19 @@ type DeleteOptions struct {
 	SubnetCIDR  string
 }
 
+// StatusOptions contains options for checking minikube cluster status
+type StatusOptions struct {
+	Project     string
+	NumClusters int
+}
+
+// LoadImageOptions contains options for loading images into minikube clusters
+type LoadImageOptions struct {
+	Project     string
+	Image       string
+	NumClusters int
+}
+
 // NewManager creates a new minikube manager
 func NewManager() *Manager {
 	binaryManager := NewBinaryManager()
@@ -114,6 +131,11 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	networkManager, driver, err := m.setupNetworkAndDriver(opts.Project, opts.Bridge, opts.SubnetCIDR)
 	if err != nil {
 		return fmt.Errorf("failed to setup network and driver: %w", err)
+	}
+
+	// ensure network is set up
+	if err := networkManager.EnsureNetwork(); err != nil {
+		return fmt.Errorf("failed to ensure network: %w", err)
 	}
 
 	// Extract network name and subnet from the network manager
@@ -167,6 +189,11 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 					logger.Errorf("failed to configure MetalLB on %s: %v", clusterName, err)
 				}
 			}
+		}
+
+		// enable CSI support
+		if err := m.enableCSI(clusterName); err != nil {
+			logger.Errorf("failed to enable CSI on %s: %v", clusterName, err)
 		}
 	}
 
@@ -283,6 +310,112 @@ func (m *Manager) DeleteClusters(opts *DeleteOptions) error {
 	}
 
 	logger.Infof("✓ successfully deleted %d Minikube cluster(s)", opts.NumClusters)
+	return nil
+}
+
+// StatusClusters shows the status of minikube clusters
+func (m *Manager) StatusClusters(opts *StatusOptions) error {
+	logger.Infof("-----> 📊 checking status of %d Minikube cluster(s) for project %s <-----", opts.NumClusters, opts.Project)
+
+	// ensure minikube binary is available
+	if err := m.binaryManager.EnsureBinary(); err != nil {
+		return fmt.Errorf("minikube binary not available: %w", err)
+	}
+
+	binaryPath, err := m.binaryManager.GetBinaryPath()
+	if err != nil {
+		return fmt.Errorf("failed to get minikube binary path: %w", err)
+	}
+
+	// prepare table data
+	type clusterStatus struct {
+		name         string
+		status       string
+		host         string
+		kubelet      string
+		apiServer    string
+		ip           string
+	}
+
+	var statuses []clusterStatus
+
+	for i := 1; i <= opts.NumClusters; i++ {
+		var clusterName string
+		if opts.NumClusters == 1 {
+			// if only one cluster, don't add suffix
+			clusterName = opts.Project
+		} else {
+			clusterName = fmt.Sprintf("%s-%d", opts.Project, i)
+		}
+
+		// check if cluster exists by trying to get its status
+		cmd := exec.Command(binaryPath, "status", "-p", clusterName, "--format", "{{.Host}},{{.Kubelet}},{{.APIServer}}")
+		output, err := cmd.Output()
+		if err != nil {
+			statuses = append(statuses, clusterStatus{
+				name:   clusterName,
+				status: "Not Found",
+				host:   "N/A",
+				kubelet: "N/A",
+				apiServer: "N/A",
+				ip:     "N/A",
+			})
+			continue
+		}
+
+		// parse status output (format: hostStatus,kubeletStatus,apiServerStatus)
+		statusStr := strings.TrimSpace(string(output))
+		parts := strings.Split(statusStr, ",")
+		if len(parts) != 3 {
+			statuses = append(statuses, clusterStatus{
+				name:   clusterName,
+				status: "Unknown",
+				host:   "N/A",
+				kubelet: "N/A",
+				apiServer: "N/A",
+				ip:     "N/A",
+			})
+			continue
+		}
+
+		hostStatus := strings.TrimSpace(parts[0])
+		kubeletStatus := strings.TrimSpace(parts[1])
+		apiServerStatus := strings.TrimSpace(parts[2])
+
+		// get cluster IP
+		ip := "N/A"
+		ipCmd := exec.Command(binaryPath, "ip", "-p", clusterName)
+		if ipOutput, err := ipCmd.Output(); err == nil {
+			ip = strings.TrimSpace(string(ipOutput))
+		}
+
+		// determine overall status
+		overallStatus := "Running"
+		if hostStatus != "Running" || kubeletStatus != "Running" || apiServerStatus != "Running" {
+			overallStatus = "Not Ready"
+		}
+
+		statuses = append(statuses, clusterStatus{
+			name:      clusterName,
+			status:    overallStatus,
+			host:      hostStatus,
+			kubelet:   kubeletStatus,
+			apiServer: apiServerStatus,
+			ip:        ip,
+		})
+	}
+
+	// print table
+	fmt.Printf("\nProject: %s\n\n", opts.Project)
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "CLUSTER\tSTATUS\tHOST\tKUBELET\tAPI SERVER\tIP")
+	fmt.Fprintln(w, "-------\t------\t----\t-------\t----------\t---")
+
+	for _, s := range statuses {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.name, s.status, s.host, s.kubelet, s.apiServer, s.ip)
+	}
+
+	w.Flush()
 	return nil
 }
 
@@ -512,10 +645,6 @@ func (m *Manager) setupNetworkAndDriver(project, bridge, subnetCIDR string) (Net
 		}
 
 		var networkManager NetworkManager = libvirtNet
-		if err := networkManager.EnsureNetwork(); err != nil {
-			return nil, "", fmt.Errorf("failed to create libvirt network: %w", err)
-		}
-
 		// use kvm2 driver in linux
 		return networkManager, "kvm2", nil
 	} else if config.IsDarwin() {
@@ -524,10 +653,6 @@ func (m *Manager) setupNetworkAndDriver(project, bridge, subnetCIDR string) (Net
 			Name: config.MinikubeVmnetNetworkName,
 		}
 		var vmnetManager NetworkManager = vmnetNetwork
-		if err := vmnetManager.EnsureNetwork(); err != nil {
-			return nil, "", fmt.Errorf("vmnet-helper installation failed: %w", err)
-		}
-
 		// use vfkit driver for darwin
 		return vmnetManager, "vfkit", nil
 	}
@@ -652,6 +777,54 @@ func (m *Manager) showProfileList() error {
 	return nil
 }
 
+// ListProfiles lists all minikube profiles
+func (m *Manager) ListProfiles() error {
+	return m.showProfileList()
+}
+
+// LoadImage loads a Docker image into minikube clusters
+func (m *Manager) LoadImage(opts *LoadImageOptions) error {
+	logger.Infof("-----> 📦 loading image %s into %d Minikube cluster(s) for project %s <-----", opts.Image, opts.NumClusters, opts.Project)
+
+	// ensure minikube binary is available
+	if err := m.binaryManager.EnsureBinary(); err != nil {
+		return fmt.Errorf("minikube binary not available: %w", err)
+	}
+
+	binaryPath, err := m.binaryManager.GetBinaryPath()
+	if err != nil {
+		return fmt.Errorf("failed to get minikube binary path: %w", err)
+	}
+
+	for i := 1; i <= opts.NumClusters; i++ {
+		var clusterName string
+		if opts.NumClusters == 1 {
+			// if only one cluster, don't add suffix
+			clusterName = opts.Project
+		} else {
+			clusterName = fmt.Sprintf("%s-%d", opts.Project, i)
+		}
+
+		status := logger.NewStatus()
+		status.Start(fmt.Sprintf("loading image %s into cluster %s (%d/%d)", opts.Image, clusterName, i, opts.NumClusters))
+
+		cmd := exec.Command(binaryPath, "image", "load", opts.Image, "-p", clusterName)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			status.End(false)
+			return fmt.Errorf("failed to load image %s into cluster %s: %w", opts.Image, clusterName, err)
+		}
+
+		status.End(true)
+		logger.Infof("✓ successfully loaded image %s into cluster %s", opts.Image, clusterName)
+	}
+
+	logger.Infof("🎉 successfully loaded image %s into %d Minikube cluster(s)", opts.Image, opts.NumClusters)
+	return nil
+}
+
 // getMinikubeIP gets the IP address of a minikube cluster
 func (m *Manager) getMinikubeIP(clusterName string) (string, error) {
 	cmd := exec.Command("minikube", "ip", "-p", clusterName)
@@ -667,6 +840,88 @@ func (m *Manager) getMinikubeIP(clusterName string) (string, error) {
 
 	logger.Debugf("Minikube IP for cluster %s: %s", clusterName, ip)
 	return ip, nil
+}
+
+// enableCSI enables CSI support for a minikube cluster
+func (m *Manager) enableCSI(clusterName string) error {
+	logger.Debugf("enabling CSI support for cluster %s", clusterName)
+
+	status := logger.NewStatus()
+	status.Start(fmt.Sprintf("enabling CSI support for cluster %s", clusterName))
+	defer status.End(true)
+
+	// get binary path
+	binaryPath, err := m.binaryManager.GetBinaryPath()
+	if err != nil {
+		status.End(false)
+		return fmt.Errorf("failed to get minikube binary path: %w", err)
+	}
+
+	// enable volumesnapshots addon
+	cmd := exec.Command(binaryPath, "addons", "enable", "volumesnapshots", "-p", clusterName)
+	cmd.Stdout = logger.GetLogger().Out
+	cmd.Stderr = logger.GetLogger().Out
+	if err := cmd.Run(); err != nil {
+		status.End(false)
+		return fmt.Errorf("failed to enable volumesnapshots addon: %w", err)
+	}
+
+	// enable csi-hostpath-driver addon
+	cmd = exec.Command(binaryPath, "addons", "enable", "csi-hostpath-driver", "-p", clusterName)
+	cmd.Stdout = logger.GetLogger().Out
+	cmd.Stderr = logger.GetLogger().Out
+	if err := cmd.Run(); err != nil {
+		status.End(false)
+		return fmt.Errorf("failed to enable csi-hostpath-driver addon: %w", err)
+	}
+
+	// disable storage-provisioner addon
+	cmd = exec.Command(binaryPath, "addons", "disable", "storage-provisioner", "-p", clusterName)
+	cmd.Stdout = logger.GetLogger().Out
+	cmd.Stderr = logger.GetLogger().Out
+	if err := cmd.Run(); err != nil {
+		logger.Debugf("failed to disable storage-provisioner addon (may not be enabled): %v", err)
+	}
+
+	// disable default-storageclass addon
+	cmd = exec.Command(binaryPath, "addons", "disable", "default-storageclass", "-p", clusterName)
+	cmd.Stdout = logger.GetLogger().Out
+	cmd.Stderr = logger.GetLogger().Out
+	if err := cmd.Run(); err != nil {
+		logger.Debugf("failed to disable default-storageclass addon (may not be enabled): %v", err)
+	}
+
+	// wait a bit for storageclass to be created
+	time.Sleep(5 * time.Second)
+
+	// create client manager for the cluster
+	clientManager, err := k8s.NewClientManagerForContext(clusterName)
+	if err != nil {
+		status.End(false)
+		return fmt.Errorf("failed to create kubernetes client manager: %w", err)
+	}
+
+	// get storageclass
+	storageClass, err := clientManager.GetClientset().StorageV1().StorageClasses().Get(context.Background(), "csi-hostpath-sc", metav1.GetOptions{})
+	if err != nil {
+		status.End(false)
+		return fmt.Errorf("failed to get storageclass csi-hostpath-sc: %w", err)
+	}
+
+	// patch storageclass annotations
+	if storageClass.Annotations == nil {
+		storageClass.Annotations = make(map[string]string)
+	}
+	storageClass.Annotations["storageclass.kubernetes.io/is-default-class"] = "true"
+
+	_, err = clientManager.GetClientset().StorageV1().StorageClasses().Update(context.Background(), storageClass, metav1.UpdateOptions{})
+	if err != nil {
+		status.End(false)
+		return fmt.Errorf("failed to patch storageclass csi-hostpath-sc: %w", err)
+	}
+
+	logger.Debugf("✓ successfully enabled CSI support for cluster %s", clusterName)
+	return nil
 }
 
 // getRegion returns a region name based on index

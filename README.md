@@ -224,6 +224,7 @@ pkg/
 ## Supported Kubernetes Versions
 
 ### Kind
+- 1.34.x
 - 1.33.x
 - 1.32.x  
 - 1.31.x

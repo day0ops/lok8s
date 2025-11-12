@@ -85,6 +85,9 @@ func init() {
 	// add subcommands
 	rootCmd.AddCommand(createCmd())
 	rootCmd.AddCommand(deleteCmd())
+	rootCmd.AddCommand(statusCmd())
+	rootCmd.AddCommand(profileListCmd())
+	rootCmd.AddCommand(imageLoadCmd())
 	rootCmd.AddCommand(configCmd())
 	rootCmd.AddCommand(versionCmd())
 	rootCmd.AddCommand(kindTunnelCmd())
@@ -488,6 +491,196 @@ func deleteKindClusters(project string, numClusters int, force bool) error {
 
 	manager := kind.NewManager()
 	return manager.DeleteClusters(opts)
+}
+
+// statusCmd shows the status of clusters
+func statusCmd() *cobra.Command {
+	var (
+		project string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show status of Kubernetes clusters",
+		Long:  `Show the status of one or more Kubernetes clusters for a project`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if project == "" {
+				return fmt.Errorf("project name is required")
+			}
+
+			// load saved config to get environment and other settings
+			savedConfig, err := configManager.LoadConfig(project)
+			if err != nil {
+				return fmt.Errorf("failed to load project config: %w", err)
+			}
+
+			// use saved config if available, otherwise use defaults
+			env := environment
+			clusters := 1
+			if savedConfig != nil {
+				if savedConfig.Environment != "" {
+					env = savedConfig.Environment
+				}
+				if savedConfig.NumClusters > 0 {
+					clusters = savedConfig.NumClusters
+				}
+			}
+
+			if clusters < 1 || clusters > 3 {
+				return fmt.Errorf("number of clusters must be between 1 and 3")
+			}
+
+			if env == "minikube" {
+				return statusMinikubeClusters(project, clusters)
+			} else if env == "kind" {
+				return statusKindClusters(project, clusters)
+			}
+			return fmt.Errorf("invalid environment: %s", env)
+		},
+	}
+
+	cmd.Flags().StringVarP(&project, "project", "p", "", "Project name (required)")
+
+	if err := cmd.MarkFlagRequired("project"); err != nil {
+		logger.Warnf("failed to mark project flag as required: %v", err)
+	}
+
+	return cmd
+}
+
+func statusMinikubeClusters(project string, numClusters int) error {
+	opts := &minikube.StatusOptions{
+		Project:     project,
+		NumClusters: numClusters,
+	}
+
+	manager := minikube.NewManager()
+	return manager.StatusClusters(opts)
+}
+
+func statusKindClusters(project string, numClusters int) error {
+	opts := &kind.StatusOptions{
+		Project:     project,
+		NumClusters: numClusters,
+	}
+
+	manager := kind.NewManager()
+	return manager.StatusClusters(opts)
+}
+
+// profileListCmd lists profiles/clusters
+func profileListCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "profile-list",
+		Short: "List all profiles/clusters",
+		Long:  `List all profiles for Minikube or clusters for Kind`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if environment == "minikube" {
+				return listMinikubeProfiles()
+			} else if environment == "kind" {
+				return listKindClusters()
+			}
+			return fmt.Errorf("invalid environment: %s", environment)
+		},
+	}
+
+	return cmd
+}
+
+func listMinikubeProfiles() error {
+	manager := minikube.NewManager()
+	return manager.ListProfiles()
+}
+
+func listKindClusters() error {
+	manager := kind.NewManager()
+	return manager.ListClusters()
+}
+
+// imageLoadCmd loads Docker images into clusters
+func imageLoadCmd() *cobra.Command {
+	var (
+		project string
+		image   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "image-load",
+		Short: "Load Docker images into clusters",
+		Long:  `Load a Docker image into all clusters for a project`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if project == "" {
+				return fmt.Errorf("project name is required")
+			}
+
+			if image == "" {
+				return fmt.Errorf("image name is required")
+			}
+
+			// load saved config to get environment and number of clusters
+			savedConfig, err := configManager.LoadConfig(project)
+			if err != nil {
+				return fmt.Errorf("failed to load project config: %w", err)
+			}
+
+			// use saved config if available, otherwise use defaults
+			env := environment
+			clusters := 1
+			if savedConfig != nil {
+				if savedConfig.Environment != "" {
+					env = savedConfig.Environment
+				}
+				if savedConfig.NumClusters > 0 {
+					clusters = savedConfig.NumClusters
+				}
+			}
+
+			if clusters < 1 || clusters > 3 {
+				return fmt.Errorf("number of clusters must be between 1 and 3")
+			}
+
+			if env == "minikube" {
+				return loadImageMinikube(project, image, clusters)
+			} else if env == "kind" {
+				return loadImageKind(project, image, clusters)
+			}
+			return fmt.Errorf("invalid environment: %s", env)
+		},
+	}
+
+	cmd.Flags().StringVarP(&project, "project", "p", "", "Project name (required)")
+	cmd.Flags().StringVarP(&image, "image", "i", "", "Docker image name to load (required)")
+
+	if err := cmd.MarkFlagRequired("project"); err != nil {
+		logger.Warnf("failed to mark project flag as required: %v", err)
+	}
+	if err := cmd.MarkFlagRequired("image"); err != nil {
+		logger.Warnf("failed to mark image flag as required: %v", err)
+	}
+
+	return cmd
+}
+
+func loadImageMinikube(project, image string, numClusters int) error {
+	opts := &minikube.LoadImageOptions{
+		Project:     project,
+		Image:       image,
+		NumClusters: numClusters,
+	}
+
+	manager := minikube.NewManager()
+	return manager.LoadImage(opts)
+}
+
+func loadImageKind(project, image string, numClusters int) error {
+	opts := &kind.LoadImageOptions{
+		Project:     project,
+		Image:       image,
+		NumClusters: numClusters,
+	}
+
+	manager := kind.NewManager()
+	return manager.LoadImage(opts)
 }
 
 // configCmd manages project configurations
