@@ -195,6 +195,11 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 		if err := m.enableCSI(clusterName); err != nil {
 			logger.Errorf("failed to enable CSI on %s: %v", clusterName, err)
 		}
+
+		// enable metrics-server addon
+		if err := m.enableMetricsServer(clusterName); err != nil {
+			logger.Errorf("failed to enable metrics-server on %s: %v", clusterName, err)
+		}
 	}
 
 	logger.Infof("✓ successfully created %d Minikube cluster(s)", opts.NumClusters)
@@ -771,6 +776,14 @@ func (m *Manager) showProfileList() error {
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
+		// Check if exit code is 14 (MK_USAGE_NO_PROFILE - no profiles found)
+		if exitError, ok := err.(*exec.ExitError); ok {
+			if exitError.ExitCode() == 14 {
+				// No profiles found - this is a valid state, not an error
+				fmt.Println("No Minikube profiles found.")
+				return nil
+			}
+		}
 		return fmt.Errorf("failed to list minikube profiles: %w", err)
 	}
 
@@ -921,6 +934,34 @@ func (m *Manager) enableCSI(clusterName string) error {
 	}
 
 	logger.Debugf("✓ successfully enabled CSI support for cluster %s", clusterName)
+	return nil
+}
+
+// enableMetricsServer enables the metrics-server addon for a minikube cluster
+func (m *Manager) enableMetricsServer(clusterName string) error {
+	logger.Debugf("enabling metrics-server addon for cluster %s", clusterName)
+
+	status := logger.NewStatus()
+	status.Start(fmt.Sprintf("enabling metrics-server addon for cluster %s", clusterName))
+	defer status.End(true)
+
+	// get binary path
+	binaryPath, err := m.binaryManager.GetBinaryPath()
+	if err != nil {
+		status.End(false)
+		return fmt.Errorf("failed to get minikube binary path: %w", err)
+	}
+
+	// enable metrics-server addon
+	cmd := exec.Command(binaryPath, "addons", "enable", "metrics-server", "-p", clusterName)
+	cmd.Stdout = logger.GetLogger().Out
+	cmd.Stderr = logger.GetLogger().Out
+	if err := cmd.Run(); err != nil {
+		status.End(false)
+		return fmt.Errorf("failed to enable metrics-server addon: %w", err)
+	}
+
+	logger.Debugf("✓ successfully enabled metrics-server addon for cluster %s", clusterName)
 	return nil
 }
 

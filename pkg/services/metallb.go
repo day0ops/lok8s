@@ -73,32 +73,45 @@ func NewMetalLBManagerWithOptions(helmManager *helm.HelmManager, minOctetRange, 
 }
 
 // InitializeTracking initializes IP tracking from saved config or starts fresh
+// Loads allocations from ALL projects to avoid IP range overlaps across projects
 func (mm *MetalLBManager) InitializeTracking(project string) error {
-	projectConfig, err := mm.configManager.LoadConfig(project)
-	if err != nil {
-		return fmt.Errorf("failed to load project config: %w", err)
-	}
-
 	// clear existing tracking
 	mm.ipAllocations = make(map[string]*config.MetalLBAllocation)
 	mm.usedRanges = make(map[string]bool)
 	mm.allNodeIPs = make(map[int]bool)
 
-	// load existing allocations from config
-	if projectConfig != nil && len(projectConfig.MetalLBAllocations) > 0 {
-		for _, alloc := range projectConfig.MetalLBAllocations {
-			mm.ipAllocations[alloc.ClusterName] = &alloc
-			// track used ranges
-			rangeKey := fmt.Sprintf("%s.%d-%d", alloc.IPPrefix, alloc.StartOctet, alloc.EndOctet)
-			mm.usedRanges[rangeKey] = true
-			// track node IPs
-			for _, nodeIP := range alloc.NodeIPs {
-				mm.allNodeIPs[nodeIP] = true
+	// load all project configs to check for existing MetalLB allocations
+	allProjects, err := mm.configManager.ListConfigs()
+	if err != nil {
+		logger.Warnf("failed to list all projects, only checking current project: %v", err)
+		// fallback to just loading current project
+		allProjects = []string{project}
+	}
+
+	// load allocations from all projects
+	for _, proj := range allProjects {
+		projectConfig, err := mm.configManager.LoadConfig(proj)
+		if err != nil {
+			logger.Debugf("failed to load config for project %s: %v", proj, err)
+			continue
+		}
+
+		if projectConfig != nil && len(projectConfig.MetalLBAllocations) > 0 {
+			for _, alloc := range projectConfig.MetalLBAllocations {
+				mm.ipAllocations[alloc.ClusterName] = &alloc
+				// track used ranges (format: ipPrefix.start-end)
+				rangeKey := fmt.Sprintf("%s.%d-%d", alloc.IPPrefix, alloc.StartOctet, alloc.EndOctet)
+				mm.usedRanges[rangeKey] = true
+				// track node IPs
+				for _, nodeIP := range alloc.NodeIPs {
+					mm.allNodeIPs[nodeIP] = true
+				}
+				logger.Debugf("loaded existing MetalLB allocation for cluster %s (project %s): %s", alloc.ClusterName, proj, alloc.IPRange)
 			}
-			logger.Debugf("loaded existing MetalLB allocation for cluster %s: %s", alloc.ClusterName, alloc.IPRange)
 		}
 	}
 
+	logger.Debugf("initialized MetalLB tracking: %d allocations from %d projects, %d used ranges", len(mm.ipAllocations), len(allProjects), len(mm.usedRanges))
 	return nil
 }
 
@@ -392,9 +405,8 @@ func (mm *MetalLBManager) generateMetalLBIPRange(clusterName, minikubeIP string,
 		endOctet = mm.maxOctetRange
 	}
 
-	// check if this range is already used by another cluster
-	rangeKey := fmt.Sprintf("%s.%d-%d", ipPrefix, startOctet, endOctet)
-	if mm.usedRanges[rangeKey] {
+	// check if this range overlaps with any existing ranges for the same IP prefix
+	if mm.hasRangeOverlap(ipPrefix, startOctet, endOctet) {
 		// find next available range
 		startOctet, endOctet = mm.findNextAvailableRange(startOctet, endOctet, ipsPerCluster, combinedNodeIPs, ipPrefix)
 	}
@@ -425,16 +437,34 @@ func (mm *MetalLBManager) generateMetalLBIPRange(clusterName, minikubeIP string,
 	return ipRange, allocation, nil
 }
 
+// hasRangeOverlap checks if the given range overlaps with any existing ranges for the same IP prefix
+func (mm *MetalLBManager) hasRangeOverlap(ipPrefix string, startOctet, endOctet int) bool {
+	// iterate through all allocations to check for overlaps
+	for _, alloc := range mm.ipAllocations {
+		// only check ranges with the same IP prefix
+		if alloc.IPPrefix != ipPrefix {
+			continue
+		}
+
+		// check if ranges overlap
+		// Two ranges overlap if: start1 <= end2 && start2 <= end1
+		if alloc.StartOctet <= endOctet && startOctet <= alloc.EndOctet {
+			logger.Debugf("range overlap detected: new range %d-%d overlaps with existing range %d-%d (cluster %s)", startOctet, endOctet, alloc.StartOctet, alloc.EndOctet, alloc.ClusterName)
+			return true
+		}
+	}
+	return false
+}
+
 // findNextAvailableRange finds the next available IP range that doesn't conflict with used ranges
 func (mm *MetalLBManager) findNextAvailableRange(startOctet, endOctet, rangeSize int, nodeIPs map[int]bool, ipPrefix string) (int, int) {
 	attempts := 0
 	maxAttempts := 100
 
 	for attempts < maxAttempts {
-		// check if this range conflicts with any used ranges for the same IP prefix
-		rangeKey := fmt.Sprintf("%s.%d-%d", ipPrefix, startOctet, endOctet)
-		if mm.usedRanges[rangeKey] {
-			// range already used, try next
+		// check if this range overlaps with any existing ranges for the same IP prefix
+		if mm.hasRangeOverlap(ipPrefix, startOctet, endOctet) {
+			// range overlaps, try next
 			startOctet++
 			endOctet = startOctet + rangeSize - 1
 			if endOctet > mm.maxOctetRange {
