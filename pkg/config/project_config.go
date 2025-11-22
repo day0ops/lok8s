@@ -95,6 +95,14 @@ func NewConfigManager() *ConfigManager {
 	}
 }
 
+// NewConfigManagerWithDir creates a new config manager with a custom config directory
+// This is useful for testing or when you want to use a specific directory
+func NewConfigManagerWithDir(configDir string) *ConfigManager {
+	return &ConfigManager{
+		configDir: configDir,
+	}
+}
+
 // GetConfigPath returns the path for a project's config file
 func (cm *ConfigManager) GetConfigPath(project string) string {
 	return filepath.Join(cm.configDir, project+".yaml")
