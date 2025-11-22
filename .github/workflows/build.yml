@@ -2,7 +2,7 @@ name: Build and Release
 
 on:
   push:
-    branches: [main]
+    branches: ["**"] # All branches
   pull_request:
     branches: [main]
 
@@ -63,6 +63,10 @@ jobs:
     needs: [lint, unit-tests]
     runs-on: ubuntu-latest
     name: Build all platforms (darwin/amd64, darwin/arm64, linux/amd64)
+    # Run builds on: pull requests only
+    # Skip builds on: push to main (merge) and push to other branches
+    # Note: Releases are handled by publish.yml workflow
+    if: github.event_name == 'pull_request'
 
     steps:
       - uses: actions/checkout@v4
@@ -103,6 +107,10 @@ jobs:
     needs: [lint, unit-tests]
     runs-on: ubuntu-24.04-arm
     name: Build linux ARM64
+    # Run builds on: pull requests only
+    # Skip builds on: push to main (merge) and push to other branches
+    # Note: Releases are handled by publish.yml workflow
+    if: github.event_name == 'pull_request'
 
     steps:
       - uses: actions/checkout@v4
