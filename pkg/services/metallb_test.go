@@ -35,12 +35,13 @@ var _ = Describe("MetalLBManager", func() {
 		helmManager    *helm.HelmManager
 		metallbManager *MetalLBManager
 		configManager  *config.ConfigManager
+		tempDir        string
 	)
 
 	BeforeEach(func() {
-		// create config manager - it will use default config dir
-		// tests will verify the logic works correctly
-		configManager = config.NewConfigManager()
+		// use a temporary directory for config files to ensure test isolation
+		tempDir = GinkgoT().TempDir()
+		configManager = config.NewConfigManagerWithDir(tempDir)
 
 		// create a minimal helm manager for testing - use empty kubeconfig path for unit tests
 		helmManager = helm.NewHelmManager("")
@@ -109,6 +110,9 @@ var _ = Describe("MetalLBManager", func() {
 			It("should clear existing tracking before loading", func() {
 				project := "test-project-clear-" + GinkgoT().Name()
 
+				// ensure no config file exists for this project (cleanup in BeforeEach should handle this)
+				_ = configManager.DeleteConfig(project)
+
 				// set some initial state
 				metallbManager.allNodeIPs[100] = true
 				metallbManager.usedRanges["192.168.1.200-219"] = true
@@ -116,7 +120,7 @@ var _ = Describe("MetalLBManager", func() {
 				err := metallbManager.InitializeTracking(project)
 				Expect(err).NotTo(HaveOccurred())
 
-				// should be cleared since no config exists for this project
+				// should be cleared since no test config exists (BeforeEach cleans up test configs)
 				Expect(metallbManager.ipAllocations).To(BeEmpty())
 				Expect(metallbManager.usedRanges).To(BeEmpty())
 				Expect(metallbManager.allNodeIPs).To(BeEmpty())
