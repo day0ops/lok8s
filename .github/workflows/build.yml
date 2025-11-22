@@ -12,6 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     name: Lint
     steps:
+      - name: Cancel Previous Actions
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+
+      - uses: actions/checkout@v5
+
       - uses: ./.github/workflows/composite-actions/lint
 
   unit-tests:
@@ -19,4 +26,11 @@ jobs:
     runs-on: ubuntu-latest
     name: Unit Tests
     steps:
+      - name: Cancel Previous Actions
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+
+      - uses: actions/checkout@v5
+
       - uses: ./.github/workflows/composite-actions/unit-tests

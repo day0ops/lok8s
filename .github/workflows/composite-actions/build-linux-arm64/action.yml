@@ -1,25 +1,21 @@
-name: 'Build Linux ARM64'
-description: 'Build lok8s for Linux ARM64'
+name: "Build Linux ARM64"
+description: "Build lok8s for Linux ARM64"
 
 inputs:
   artifact-name:
-    description: 'Name for the build artifacts'
+    description: "Name for the build artifacts"
     required: true
   checksum-name:
-    description: 'Name for the checksum artifacts'
+    description: "Name for the checksum artifacts"
     required: true
   fetch-depth:
-    description: 'Git fetch depth (0 for full history)'
+    description: "Git fetch depth (0 for full history)"
     required: false
-    default: '0'
+    default: "0"
 
 runs:
-  using: 'composite'
+  using: "composite"
   steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: ${{ inputs.fetch-depth }}
-
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
@@ -52,4 +48,3 @@ runs:
         name: ${{ inputs.checksum-name }}
         path: _output/binaries/lok8s-linux-arm64*.sha256sum
         retention-days: 30
-

@@ -15,6 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     name: Lint
     steps:
+      - name: Cancel Previous Actions
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+
+      - uses: actions/checkout@v5
+
       - uses: ./.github/workflows/composite-actions/lint
 
   unit-tests:
@@ -22,6 +29,13 @@ jobs:
     runs-on: ubuntu-latest
     name: Unit Tests
     steps:
+      - name: Cancel Previous Actions
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+
+      - uses: actions/checkout@v5
+
       - uses: ./.github/workflows/composite-actions/unit-tests
 
   build:
@@ -29,6 +43,15 @@ jobs:
     runs-on: ubuntu-latest
     name: Build all platforms (darwin/amd64, darwin/arm64, linux/amd64)
     steps:
+      - name: Cancel Previous Actions
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - uses: ./.github/workflows/composite-actions/build
         with:
           artifact-name: lok8s-binaries-pr
@@ -40,6 +63,15 @@ jobs:
     runs-on: ubuntu-24.04-arm
     name: Build linux ARM64
     steps:
+      - name: Cancel Previous Actions
+        uses: styfle/cancel-workflow-action@0.12.1
+        with:
+          access_token: ${{ github.token }}
+
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - uses: ./.github/workflows/composite-actions/build-linux-arm64
         with:
           artifact-name: lok8s-binaries-arm64-pr

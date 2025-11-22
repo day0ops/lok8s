@@ -1,11 +1,9 @@
-name: 'Unit Tests'
-description: 'Run unit tests for lok8s'
+name: "Unit Tests"
+description: "Run unit tests for lok8s"
 
 runs:
-  using: 'composite'
+  using: "composite"
   steps:
-    - uses: actions/checkout@v4
-
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
@@ -28,4 +26,3 @@ runs:
         file: ./coverage.out
         flags: unittests
         name: codecov-umbrella
-
