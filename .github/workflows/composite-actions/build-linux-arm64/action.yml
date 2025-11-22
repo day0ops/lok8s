@@ -8,10 +8,10 @@ inputs:
   checksum-name:
     description: "Name for the checksum artifacts"
     required: true
-  fetch-depth:
-    description: "Git fetch depth (0 for full history)"
+  upload-artifacts:
+    description: "Whether to upload build artifacts"
     required: false
-    default: "0"
+    default: "true"
 
 runs:
   using: "composite"
@@ -36,6 +36,7 @@ runs:
       run: ls -la _output/binaries/
 
     - name: Upload build artifacts
+      if: inputs.upload-artifacts == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}
@@ -43,6 +44,7 @@ runs:
         retention-days: 30
 
     - name: Upload checksums
+      if: inputs.upload-artifacts == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.checksum-name }}

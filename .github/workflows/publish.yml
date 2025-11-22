@@ -28,11 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     name: Unit Tests
     steps:
-      - name: Cancel Previous Actions
-        uses: styfle/cancel-workflow-action@0.12.1
-        with:
-          access_token: ${{ github.token }}
-
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -41,77 +36,23 @@ jobs:
 
   build:
     needs: [lint, unit-tests]
-    strategy:
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            platform: linux-amd64
-            build_cmd: make build-all
-            artifact_pattern: lok8s-linux-amd64*
-            artifact_name: lok8s-binaries-linux-amd64
-            checksum_name: lok8s-checksums-linux-amd64
-            install_deps: |
-              sudo apt-get update
-              sudo apt-get install -y libvirt-dev
-          - runner: macos-latest
-            platform: darwin
-            build_cmd: make build-darwin
-            artifact_pattern: lok8s-darwin-*
-            artifact_name: lok8s-binaries-darwin
-            checksum_name: lok8s-checksums-darwin
-            install_deps: ""
-    runs-on: ${{ matrix.runner }}
-    name: Build ${{ matrix.platform }}
-
+    runs-on: ubuntu-latest
+    name: Build all platforms (darwin/amd64, darwin/arm64, linux/amd64)
     steps:
-      - name: Cancel Previous Actions
-        uses: styfle/cancel-workflow-action@0.12.1
-        with:
-          access_token: ${{ github.token }}
-
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0 # Needed for git describe
+          fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - uses: ./.github/workflows/composite-actions/build
         with:
-          go-version-file: go.mod
-
-      - name: Install dependencies
-        if: matrix.install_deps != ''
-        run: ${{ matrix.install_deps }}
-
-      - name: Build binaries
-        run: ${{ matrix.build_cmd }}
-
-      - name: List built binaries
-        run: ls -la _output/binaries/
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: _output/binaries/${{ matrix.artifact_pattern }}
-          retention-days: 30
-
-      - name: Upload checksums
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.checksum_name }}
-          path: _output/binaries/${{ matrix.artifact_pattern }}.sha256sum
-          retention-days: 30
+          artifact-name: lok8s-binaries-pr
+          checksum-name: lok8s-checksums-pr
 
   build-linux-arm64:
     needs: [lint, unit-tests]
     runs-on: ubuntu-24.04-arm
     name: Build linux ARM64
     steps:
-      - name: Cancel Previous Actions
-        uses: styfle/cancel-workflow-action@0.12.1
-        with:
-          access_token: ${{ github.token }}
-
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
@@ -120,7 +61,6 @@ jobs:
         with:
           artifact-name: lok8s-binaries-arm64
           checksum-name: lok8s-checksums-arm64
-          fetch-depth: "0"
 
   release:
     needs: [lint, unit-tests, build, build-linux-arm64]
@@ -131,11 +71,6 @@ jobs:
       contents: write
 
     steps:
-      - name: Cancel Previous Actions
-        uses: styfle/cancel-workflow-action@0.12.1
-        with:
-          access_token: ${{ github.token }}
-
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
