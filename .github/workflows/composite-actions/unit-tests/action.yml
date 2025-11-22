@@ -1,0 +1,31 @@
+name: 'Unit Tests'
+description: 'Run unit tests for lok8s'
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libvirt-dev
+
+    - name: Run unit tests
+      shell: bash
+      run: |
+        go test -v -race -coverprofile=coverage.out ./pkg/...
+
+    - name: Upload coverage reports
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-umbrella
+

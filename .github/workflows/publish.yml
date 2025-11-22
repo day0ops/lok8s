@@ -11,55 +11,15 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     name: Lint
-
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Needed for git describe
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvirt-dev
-
-      - name: Run linter
-        run: make lint
+      - uses: ./.github/workflows/composite-actions/lint
 
   unit-tests:
     needs: [lint]
     runs-on: ubuntu-latest
     name: Unit Tests
-
     steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0 # Needed for git describe
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvirt-dev
-
-      - name: Run unit tests
-        run: |
-          go test -v -race -coverprofile=coverage.out ./pkg/...
-
-      - name: Upload coverage reports
-        uses: codecov/codecov-action@v4
-        with:
-          file: ./coverage.out
-          flags: unittests
-          name: codecov-umbrella
+      - uses: ./.github/workflows/composite-actions/unit-tests
 
   build:
     needs: [lint, unit-tests]
@@ -123,41 +83,12 @@ jobs:
     needs: [lint, unit-tests]
     runs-on: ubuntu-24.04-arm
     name: Build linux ARM64
-
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/workflows/composite-actions/build-linux-arm64
         with:
-          fetch-depth: 0 # Needed for git describe
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libvirt-dev gcc make git
-
-      - name: Build linux arm64
-        run: make build-linux-arm64
-
-      - name: List built binaries
-        run: ls -la _output/binaries/
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: lok8s-binaries-arm64
-          path: _output/binaries/lok8s-linux-arm64*
-          retention-days: 30
-
-      - name: Upload checksums
-        uses: actions/upload-artifact@v4
-        with:
-          name: lok8s-checksums-arm64
-          path: _output/binaries/lok8s-linux-arm64*.sha256sum
-          retention-days: 30
+          artifact-name: lok8s-binaries-arm64
+          checksum-name: lok8s-checksums-arm64
+          fetch-depth: "0"
 
   release:
     needs: [lint, unit-tests, build, build-linux-arm64]
