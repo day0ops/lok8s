@@ -1,0 +1,20 @@
+name: "Lint"
+description: "Run linter for lok8s"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libvirt-dev
+
+    - name: Run linter
+      shell: bash
+      run: make lint

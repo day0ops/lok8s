@@ -1,0 +1,52 @@
+name: "Build Linux ARM64"
+description: "Build lok8s for Linux ARM64"
+
+inputs:
+  artifact-name:
+    description: "Name for the build artifacts"
+    required: true
+  checksum-name:
+    description: "Name for the checksum artifacts"
+    required: true
+  upload-artifacts:
+    description: "Whether to upload build artifacts"
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libvirt-dev gcc make git
+
+    - name: Build linux arm64
+      shell: bash
+      run: make build-linux-arm64
+
+    - name: List built binaries
+      shell: bash
+      run: ls -la _output/binaries/
+
+    - name: Upload build artifacts
+      if: inputs.upload-artifacts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: _output/binaries/lok8s-linux-arm64*
+        retention-days: 30
+
+    - name: Upload checksums
+      if: inputs.upload-artifacts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.checksum-name }}
+        path: _output/binaries/lok8s-linux-arm64*.sha256sum
+        retention-days: 30

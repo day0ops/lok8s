@@ -1,0 +1,52 @@
+name: "Build"
+description: "Build lok8s for all platforms"
+
+inputs:
+  artifact-name:
+    description: "Name for the build artifacts"
+    required: true
+  checksum-name:
+    description: "Name for the checksum artifacts"
+    required: true
+  upload-artifacts:
+    description: "Whether to upload build artifacts"
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+
+    - name: Install dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libvirt-dev
+
+    - name: Build all platforms
+      shell: bash
+      run: make build-all
+
+    - name: List built binaries
+      shell: bash
+      run: ls -la _output/binaries/
+
+    - name: Upload build artifacts
+      if: inputs.upload-artifacts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: _output/binaries/
+        retention-days: 30
+
+    - name: Upload checksums
+      if: inputs.upload-artifacts == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.checksum-name }}
+        path: _output/binaries/*.sha256sum
+        retention-days: 30
