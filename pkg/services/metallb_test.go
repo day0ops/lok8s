@@ -110,17 +110,38 @@ var _ = Describe("MetalLBManager", func() {
 			It("should clear existing tracking before loading", func() {
 				project := "test-project-clear-" + GinkgoT().Name()
 
-				// ensure no config file exists for this project (cleanup in BeforeEach should handle this)
+				// clean up ALL config files in the temp directory to ensure clean state
+				// InitializeTracking loads from all projects, so we need to remove all configs
+				allProjects, err := configManager.ListConfigs()
+				if err == nil {
+					for _, proj := range allProjects {
+						_ = configManager.DeleteConfig(proj)
+					}
+				}
+				// ensure no config file exists for this project
 				_ = configManager.DeleteConfig(project)
 
+				// verify the directory is actually empty before proceeding
+				remainingProjects, err := configManager.ListConfigs()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(remainingProjects).To(BeEmpty(), "config directory should be empty before InitializeTracking")
+
 				// set some initial state
+				metallbManager.ipAllocations["test-cluster"] = &config.MetalLBAllocation{
+					ClusterName: "test-cluster",
+					IPPrefix:    "192.168.1",
+					StartOctet:  200,
+					EndOctet:    219,
+					NodeIPs:     []int{100},
+					IPRange:     "192.168.1.200-192.168.1.219",
+				}
 				metallbManager.allNodeIPs[100] = true
 				metallbManager.usedRanges["192.168.1.200-219"] = true
 
-				err := metallbManager.InitializeTracking(project)
+				err = metallbManager.InitializeTracking(project)
 				Expect(err).NotTo(HaveOccurred())
 
-				// should be cleared since no test config exists (BeforeEach cleans up test configs)
+				// should be cleared since no config files exist in the temp directory
 				Expect(metallbManager.ipAllocations).To(BeEmpty())
 				Expect(metallbManager.usedRanges).To(BeEmpty())
 				Expect(metallbManager.allNodeIPs).To(BeEmpty())
