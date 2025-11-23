@@ -45,8 +45,8 @@ jobs:
 
       - uses: ./.github/workflows/composite-actions/build
         with:
-          artifact-name: lok8s-binaries-pr
-          checksum-name: lok8s-checksums-pr
+          artifact-name: lok8s-binaries-release
+          checksum-name: lok8s-checksums-release
 
   build-linux-arm64:
     needs: [lint, unit-tests]
@@ -75,10 +75,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download build artifacts (linux-amd64)
+      - name: Download build artifacts (all platforms)
         uses: actions/download-artifact@v4
         with:
-          name: lok8s-binaries-linux-amd64
+          name: lok8s-binaries-release
           path: ./binaries
 
       - name: Download build artifacts (linux-arm64)
@@ -87,28 +87,16 @@ jobs:
           name: lok8s-binaries-arm64
           path: ./binaries
 
-      - name: Download build artifacts (darwin)
+      - name: Download checksums (all platforms)
         uses: actions/download-artifact@v4
         with:
-          name: lok8s-binaries-darwin
-          path: ./binaries
-
-      - name: Download checksums (linux-amd64)
-        uses: actions/download-artifact@v4
-        with:
-          name: lok8s-checksums-linux-amd64
+          name: lok8s-checksums-release
           path: ./binaries
 
       - name: Download checksums (linux-arm64)
         uses: actions/download-artifact@v4
         with:
           name: lok8s-checksums-arm64
-          path: ./binaries
-
-      - name: Download checksums (darwin)
-        uses: actions/download-artifact@v4
-        with:
-          name: lok8s-checksums-darwin
           path: ./binaries
 
       - name: List all binaries
