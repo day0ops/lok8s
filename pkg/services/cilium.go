@@ -76,6 +76,9 @@ func (cm *CiliumManager) InstallCilium(clusterName string) error {
 		"envoy": map[string]interface{}{
 			"enabled": false,
 		},
+		"cni": map[string]interface{}{
+			"exclusive": false,
+		},
 	}
 
 	if err := cm.helmManager.InstallChart("cilium", "cilium/cilium", "kube-system", values, 5*time.Minute); err != nil {
@@ -197,6 +200,9 @@ func (cm *CiliumManager) GenerateCiliumManifest(clusterName string) (string, err
 		"kubeProxyReplacement": false,
 		"envoy": map[string]interface{}{
 			"enabled": false,
+		},
+		"cni": map[string]interface{}{
+			"exclusive": false,
 		},
 	}
 
