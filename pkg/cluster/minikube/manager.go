@@ -334,12 +334,12 @@ func (m *Manager) StatusClusters(opts *StatusOptions) error {
 
 	// prepare table data
 	type clusterStatus struct {
-		name         string
-		status       string
-		host         string
-		kubelet      string
-		apiServer    string
-		ip           string
+		name      string
+		status    string
+		host      string
+		kubelet   string
+		apiServer string
+		ip        string
 	}
 
 	var statuses []clusterStatus
@@ -358,12 +358,12 @@ func (m *Manager) StatusClusters(opts *StatusOptions) error {
 		output, err := cmd.Output()
 		if err != nil {
 			statuses = append(statuses, clusterStatus{
-				name:   clusterName,
-				status: "Not Found",
-				host:   "N/A",
-				kubelet: "N/A",
+				name:      clusterName,
+				status:    "Not Found",
+				host:      "N/A",
+				kubelet:   "N/A",
 				apiServer: "N/A",
-				ip:     "N/A",
+				ip:        "N/A",
 			})
 			continue
 		}
@@ -373,12 +373,12 @@ func (m *Manager) StatusClusters(opts *StatusOptions) error {
 		parts := strings.Split(statusStr, ",")
 		if len(parts) != 3 {
 			statuses = append(statuses, clusterStatus{
-				name:   clusterName,
-				status: "Unknown",
-				host:   "N/A",
-				kubelet: "N/A",
+				name:      clusterName,
+				status:    "Unknown",
+				host:      "N/A",
+				kubelet:   "N/A",
 				apiServer: "N/A",
-				ip:     "N/A",
+				ip:        "N/A",
 			})
 			continue
 		}
@@ -777,13 +777,26 @@ func (m *Manager) showProfileList() error {
 
 	if err := cmd.Run(); err != nil {
 		// Check if exit code is 14 (MK_USAGE_NO_PROFILE - no profiles found)
+		// or if error message contains MK_USAGE_NO_PROFILE
+		errStr := err.Error()
+		isNoProfile := false
+
 		if exitError, ok := err.(*exec.ExitError); ok {
 			if exitError.ExitCode() == 14 {
-				// No profiles found - this is a valid state, not an error
-				fmt.Println("No Minikube profiles found.")
-				return nil
+				isNoProfile = true
 			}
 		}
+
+		if !isNoProfile && strings.Contains(errStr, "MK_USAGE_NO_PROFILE") {
+			isNoProfile = true
+		}
+
+		if isNoProfile {
+			// No profiles found - this is a valid state, not an error
+			fmt.Println("No profiles found.")
+			return nil
+		}
+
 		return fmt.Errorf("failed to list minikube profiles: %w", err)
 	}
 

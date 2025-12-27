@@ -314,7 +314,14 @@ func (m *Manager) StatusClusters(opts *StatusOptions) error {
 	// get list of existing kind clusters
 	existingClusters, err := m.provider.List()
 	if err != nil {
-		return fmt.Errorf("failed to list kind clusters: %w", err)
+		// check if error is due to no clusters found (docker command fails when no clusters exist)
+		// this is a valid state - treat as empty list and continue
+		errStr := err.Error()
+		if strings.Contains(errStr, "failed to list clusters") || strings.Contains(errStr, "exit status 1") {
+			existingClusters = []string{}
+		} else {
+			return fmt.Errorf("failed to list kind clusters: %w", err)
+		}
 	}
 
 	// create a map of existing cluster names for quick lookup
@@ -421,11 +428,18 @@ func (m *Manager) ListClusters() error {
 
 	clusters, err := m.provider.List()
 	if err != nil {
+		// Check if error is due to no clusters found (docker command fails when no clusters exist)
+		// This is a valid state, not an error
+		errStr := err.Error()
+		if strings.Contains(errStr, "failed to list clusters") || strings.Contains(errStr, "exit status 1") {
+			fmt.Println("No clusters found.")
+			return nil
+		}
 		return fmt.Errorf("failed to list kind clusters: %w", err)
 	}
 
 	if len(clusters) == 0 {
-		fmt.Println("No Kind clusters found.")
+		fmt.Println("No clusters found.")
 		return nil
 	}
 
@@ -458,7 +472,14 @@ func (m *Manager) LoadImage(opts *LoadImageOptions) error {
 		// verify cluster exists using SDK
 		existingClusters, err := m.provider.List()
 		if err != nil {
-			return fmt.Errorf("failed to list kind clusters: %w", err)
+			// Check if error is due to no clusters found (docker command fails when no clusters exist)
+			// This is a valid state - treat as empty list and continue
+			errStr := err.Error()
+			if strings.Contains(errStr, "failed to list clusters") || strings.Contains(errStr, "exit status 1") {
+				existingClusters = []string{} // Treat as empty list
+			} else {
+				return fmt.Errorf("failed to list kind clusters: %w", err)
+			}
 		}
 
 		clusterExists := false
@@ -651,7 +672,19 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 
 	// check if cluster already exists
 	clusters, err := m.provider.List()
-	if err == nil {
+	if err != nil {
+		// Check if error is due to no clusters found (docker command fails when no clusters exist)
+		// This is a valid state - treat as empty list and continue
+		errStr := err.Error()
+		if strings.Contains(errStr, "failed to list clusters") || strings.Contains(errStr, "exit status 1") {
+			clusters = []string{} // Treat as empty list
+		} else {
+			// For other errors, log a warning but continue (cluster might not exist yet)
+			logger.Debugf("failed to list existing clusters (non-fatal): %v", err)
+			clusters = []string{}
+		}
+	}
+	if len(clusters) > 0 {
 		for _, existingCluster := range clusters {
 			if existingCluster == clusterName {
 				if opts.Recreate {
