@@ -36,6 +36,7 @@ import (
 
 	"github.com/day0ops/lok8s/pkg/cluster/kind"
 	"github.com/day0ops/lok8s/pkg/cluster/minikube"
+	"github.com/day0ops/lok8s/pkg/cluster/native"
 	"github.com/day0ops/lok8s/pkg/config"
 	"github.com/day0ops/lok8s/pkg/logger"
 )
@@ -51,12 +52,13 @@ var (
 var rootCmd = &cobra.Command{
 	Use:   config.AppName,
 	Short: "A tool for provisioning local Kubernetes clusters (multi) with network management",
-	Long: strings.Replace(`[config.AppName] is a comprehensive tool that combines cluster provisioning 
-with advanced network management capabilities. It supports both Kind and Minikube clusters
-on Linux and macOS platforms.
+	Long: strings.Replace(`[config.AppName] is a comprehensive tool that combines cluster provisioning
+with advanced network management capabilities. It supports Kind and Minikube clusters
+on Linux and macOS platforms, and a native provider (macOS on Apple Silicon only).
 
 Default behavior: If no --environment flag is specified, [config.AppName] will default to minikube.
-Use '[config.AppName] --environment kind' to use kind instead.`, "[config.AppName]", config.AppName, -1),
+Use '[config.AppName] --environment kind' or '[config.AppName] --environment native' to use kind
+or the native provider instead.`, "[config.AppName]", config.AppName, -1),
 	Version: config.GetVersion(),
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		return initializeConfig()
@@ -86,7 +88,7 @@ func init() {
 	// global flags
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (YAML format, can be located anywhere)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose logging")
-	rootCmd.PersistentFlags().StringVarP(&environment, "environment", "e", "minikube", "environment to use (minikube or kind)")
+	rootCmd.PersistentFlags().StringVarP(&environment, "environment", "e", "minikube", "environment to use (minikube, kind, or native)")
 
 	// add subcommands
 	rootCmd.AddCommand(createCmd())
@@ -233,17 +235,19 @@ func createCmd() *cobra.Command {
 				return fmt.Errorf("number of clusters must be between 1 and 3")
 			}
 
-			// validate container runtime
-			validRuntimes := []string{"containerd", "cri-o", "docker"}
-			isValidRuntime := false
-			for _, runtime := range validRuntimes {
-				if finalConfig.ContainerRuntime == runtime {
-					isValidRuntime = true
-					break
+			// validate container runtime (native always uses k3s's embedded containerd, so this doesn't apply to it)
+			if finalConfig.Environment != "native" {
+				validRuntimes := []string{"containerd", "cri-o", "docker"}
+				isValidRuntime := false
+				for _, runtime := range validRuntimes {
+					if finalConfig.ContainerRuntime == runtime {
+						isValidRuntime = true
+						break
+					}
 				}
-			}
-			if !isValidRuntime {
-				return fmt.Errorf("invalid container runtime: %s. Valid options are: %s", finalConfig.ContainerRuntime, strings.Join(validRuntimes, ", "))
+				if !isValidRuntime {
+					return fmt.Errorf("invalid container runtime: %s. Valid options are: %s", finalConfig.ContainerRuntime, strings.Join(validRuntimes, ", "))
+				}
 			}
 
 			// validate CNI
@@ -278,6 +282,8 @@ func createCmd() *cobra.Command {
 				return createMinikubeClusters(finalConfig, configManager)
 			} else if finalConfig.Environment == "kind" {
 				return createKindClusters(finalConfig, recreate, configManager)
+			} else if finalConfig.Environment == "native" {
+				return createNativeClusters(finalConfig, recreate, configManager)
 			}
 			return fmt.Errorf("invalid environment: %s", finalConfig.Environment)
 		},
@@ -355,6 +361,8 @@ func deleteCmd() *cobra.Command {
 				return deleteMinikubeClusters(project, clusters, force)
 			} else if env == "kind" {
 				return deleteKindClusters(project, clusters, force)
+			} else if env == "native" {
+				return deleteNativeClusters(project, clusters, force)
 			}
 			return fmt.Errorf("invalid environment: %s", env)
 		},
@@ -374,14 +382,14 @@ func deleteCmd() *cobra.Command {
 // runCreateCommand handles the create command with environment selection
 func runCreateCommand(cmd *cobra.Command, args []string) error {
 	// validate environment selection
-	if environment != "minikube" && environment != "kind" {
-		return fmt.Errorf("invalid environment '%s'. Must be 'minikube' or 'kind'", environment)
+	if environment != "minikube" && environment != "kind" && environment != "native" {
+		return fmt.Errorf("invalid environment '%s'. Must be 'minikube', 'kind', or 'native'", environment)
 	}
 
 	// show help for create command
 	fmt.Printf("Creating clusters using %s environment.\n", environment)
 	fmt.Println("Use '" + config.AppName + " create --help' for create command options.")
-	fmt.Println("Use '" + config.AppName + " --environment kind' to use kind instead.")
+	fmt.Println("Use '" + config.AppName + " --environment kind' or '" + config.AppName + " --environment native' to use kind or the native provider instead.")
 	fmt.Println()
 
 	createCmd := createCmd()
@@ -457,6 +465,38 @@ func createKindClusters(finalConfig *config.ProjectConfig, recreate bool, config
 	return nil
 }
 
+func createNativeClusters(finalConfig *config.ProjectConfig, recreate bool, configManager *config.ConfigManager) error {
+	opts := &native.CreateOptions{
+		Project:        finalConfig.Project,
+		SubnetCIDR:     finalConfig.SubnetCIDR,
+		NumClusters:    finalConfig.NumClusters,
+		NodeCount:      finalConfig.NodeCount,
+		K8sVersion:     finalConfig.K8sVersion,
+		InstallMetalLB: finalConfig.InstallMetalLB,
+		CNI:            finalConfig.CNI,
+		Recreate:       recreate,
+	}
+
+	manager := native.NewManager()
+	err := manager.CreateClusters(opts)
+	if err != nil {
+		return err
+	}
+
+	// Update finalConfig with actual subnet used (may have been changed by FindFreeSubnet)
+	if opts.SubnetCIDR != "" && opts.SubnetCIDR != finalConfig.SubnetCIDR {
+		finalConfig.SubnetCIDR = opts.SubnetCIDR
+		logger.Debugf("updating saved config with actual subnet: %s", finalConfig.SubnetCIDR)
+	}
+
+	// save config only after successful cluster creation
+	if err := configManager.SaveConfig(finalConfig.Project, finalConfig); err != nil {
+		logger.Warnf("failed to save project config: %v", err)
+	}
+
+	return nil
+}
+
 func deleteMinikubeClusters(project string, numClusters int, force bool) error {
 	// load saved config to get Bridge and SubnetCIDR
 	savedConfig, err := configManager.LoadConfig(project)
@@ -496,6 +536,17 @@ func deleteKindClusters(project string, numClusters int, force bool) error {
 	}
 
 	manager := kind.NewManager()
+	return manager.DeleteClusters(opts)
+}
+
+func deleteNativeClusters(project string, numClusters int, force bool) error {
+	opts := &native.DeleteOptions{
+		Project:     project,
+		NumClusters: numClusters,
+		Force:       force,
+	}
+
+	manager := native.NewManager()
 	return manager.DeleteClusters(opts)
 }
 
@@ -540,6 +591,8 @@ func statusCmd() *cobra.Command {
 				return statusMinikubeClusters(project, clusters)
 			} else if env == "kind" {
 				return statusKindClusters(project, clusters)
+			} else if env == "native" {
+				return statusNativeClusters(project, clusters)
 			}
 			return fmt.Errorf("invalid environment: %s", env)
 		},
@@ -574,6 +627,16 @@ func statusKindClusters(project string, numClusters int) error {
 	return manager.StatusClusters(opts)
 }
 
+func statusNativeClusters(project string, numClusters int) error {
+	opts := &native.StatusOptions{
+		Project:     project,
+		NumClusters: numClusters,
+	}
+
+	manager := native.NewManager()
+	return manager.StatusClusters(opts)
+}
+
 // profileListCmd lists profiles/clusters across all supported environments
 func profileListCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -594,10 +657,11 @@ type profileEntry struct {
 	name     string
 }
 
-// listAllProfiles lists Minikube profiles and Kind clusters together in a single, consistent table.
-// Each provider is checked on a best-effort basis: a failure checking one provider (e.g. its
-// tooling/runtime isn't set up) is logged at debug level rather than warn, so users who only use
-// one of the two providers don't see noise about the other by default. Use --verbose to see it.
+// listAllProfiles lists Minikube profiles, Kind clusters, and native clusters together in a
+// single, consistent table. Each provider is checked on a best-effort basis: a failure checking
+// one provider (e.g. its tooling/runtime isn't set up) is logged at debug level rather than warn,
+// so users who only use one provider don't see noise about the others by default. Use --verbose
+// to see it.
 func listAllProfiles() error {
 	var entries []profileEntry
 
@@ -615,6 +679,14 @@ func listAllProfiles() error {
 	}
 	for _, name := range kindNames {
 		entries = append(entries, profileEntry{provider: "kind", name: name})
+	}
+
+	nativeNames, err := native.NewManager().ListClusterNames()
+	if err != nil {
+		logger.Debugf("native: %v", err)
+	}
+	for _, name := range nativeNames {
+		entries = append(entries, profileEntry{provider: "native", name: name})
 	}
 
 	if len(entries) == 0 {
@@ -678,6 +750,8 @@ func imageLoadCmd() *cobra.Command {
 				return loadImageMinikube(project, image, clusters)
 			} else if env == "kind" {
 				return loadImageKind(project, image, clusters)
+			} else if env == "native" {
+				return loadImageNative(project, image, clusters)
 			}
 			return fmt.Errorf("invalid environment: %s", env)
 		},
@@ -715,6 +789,17 @@ func loadImageKind(project, image string, numClusters int) error {
 	}
 
 	manager := kind.NewManager()
+	return manager.LoadImage(opts)
+}
+
+func loadImageNative(project, image string, numClusters int) error {
+	opts := &native.LoadImageOptions{
+		Project:     project,
+		Image:       image,
+		NumClusters: numClusters,
+	}
+
+	manager := native.NewManager()
 	return manager.LoadImage(opts)
 }
 
