@@ -21,6 +21,7 @@ Features:
 - **Multiple Cluster Providers**: 
   - Kind clusters with Docker/Podman support
   - Minikube clusters with KVM2 (Linux) and VFKit (macOS) drivers
+  - Native clusters backed by Apple's `container` CLI and Virtualization.framework (macOS on Apple Silicon only), giving each node its own real Linux VM instead of a shared-kernel container
 - **Advanced Networking**: 
   - Integrated libvirt network management (Linux)
   - Automatic network isolation between clusters
@@ -49,6 +50,10 @@ For now this tool is limited to macOS and Linux platforms.
 #### macOS-Specific Requirements
 - VFKit (for Minikube multi-cluster setups)
 - vmnet-helper (for advanced networking)
+
+#### Native Provider Requirements (`--environment native`)
+- macOS 26 or later on Apple Silicon (Intel Macs and older macOS versions aren't supported - this is Apple's own requirement for the `container` CLI, not a choice made by lok8s)
+- [`container`](https://github.com/apple/container) CLI version 1.2.1 or later, with its system services running (`container system start`)
 
 ### Download the binary
 
@@ -91,6 +96,12 @@ lok8s create -p myproject -n 3 \
 
 # Create without MetalLB
 lok8s create -p myproject -n 1 --environment kind --skip-metallb-install
+
+# Create a single-control-plane native cluster (macOS on Apple Silicon only)
+lok8s create -p myproject -n 1 --environment native --nodes 0
+
+# Create a native cluster with 2 worker nodes
+lok8s create -p myproject -n 1 --environment native --nodes 2
 ```
 
 ### Deleting Clusters
@@ -103,9 +114,14 @@ lok8s delete -p myproject -n 2
 # Delete Kind clusters
 lok8s delete -p myproject -n 3 --environment kind
 
+# Delete native clusters
+lok8s delete -p myproject -n 1 --environment native
+
 # Force delete (removes networks and config files)
 lok8s delete -p myproject -n 2 --force
 ```
+
+**Note:** Image loading (`lok8s image-load`) isn't yet supported for the native provider - `container image load` only seeds the local image store, not a running node's containerd.
 
 ### Managing Kind Tunnels
 
@@ -191,9 +207,15 @@ pkg/
 │   └── kind_tunnel.go
 ├── cluster/
 │   ├── kind/
-│   └── minikube/
+│   ├── minikube/
+│   │   ├── manager.go
+│   │   └── binary_manager.go
+│   └── native/
 │       ├── manager.go
-│       └── binary_manager.go
+│       ├── container_client.go
+│       ├── k3s.go
+│       ├── subnet.go
+│       └── kubeconfig_merge.go
 ├── config/
 │   ├── config.go
 │   └── project_config.go
@@ -239,6 +261,12 @@ pkg/
 - 1.33.x
 - 1.32.x
 - Any valid semantic version (will be validated)
+
+### Native (k3s)
+- 1.36.x
+- 1.35.x
+- 1.34.x
+- 1.33.x
 
 ## Contributing
 
