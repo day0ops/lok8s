@@ -195,14 +195,14 @@ install-go-tools:
 	@echo "Installing Go development tools..."
 	@if ! command -v golangci-lint >/dev/null 2>&1; then \
 		echo "Installing golangci-lint v2..."; \
-		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin v2.6.1; \
+		curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin v2.13.2; \
 	else \
 		INSTALLED_VERSION=$$(golangci-lint version 2>/dev/null | head -1); \
 		if echo "$$INSTALLED_VERSION" | grep -qE '\bv2\.|version.*2\.'; then \
 			echo "golangci-lint v2 is already installed"; \
 		else \
 			echo "Upgrading golangci-lint to v2..."; \
-			curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin v2.6.1; \
+			curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $$(go env GOPATH)/bin v2.13.2; \
 		fi \
 	fi
 	@if ! command -v goimports >/dev/null 2>&1; then \

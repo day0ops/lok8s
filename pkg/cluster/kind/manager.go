@@ -37,11 +37,13 @@ import (
 	"github.com/day0ops/lok8s/pkg/config"
 	"github.com/day0ops/lok8s/pkg/logger"
 	"github.com/day0ops/lok8s/pkg/services"
+	"github.com/day0ops/lok8s/pkg/util"
 	"github.com/day0ops/lok8s/pkg/util/docker"
 	"github.com/day0ops/lok8s/pkg/util/helm"
 	"github.com/day0ops/lok8s/pkg/util/k8s"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/kind/pkg/cluster"
+	kindexec "sigs.k8s.io/kind/pkg/exec"
 )
 
 // Manager manages kind clusters
@@ -245,6 +247,12 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	}
 
 	logger.Infof("🎉 successfully created %d Kind cluster(s)", opts.NumClusters)
+
+	// show cluster status summary
+	if err := m.printClusterStatusTable(&StatusOptions{Project: opts.Project, NumClusters: opts.NumClusters}); err != nil {
+		logger.Warnf("failed to show cluster status: %v", err)
+	}
+
 	return nil
 }
 
@@ -310,18 +318,15 @@ func (m *Manager) DeleteClusters(opts *DeleteOptions) error {
 // StatusClusters shows the status of kind clusters
 func (m *Manager) StatusClusters(opts *StatusOptions) error {
 	logger.Infof("-----> 📊 checking status of %d Kind cluster(s) for project %s <-----", opts.NumClusters, opts.Project)
+	return m.printClusterStatusTable(opts)
+}
 
+// printClusterStatusTable builds and prints a status table for the given project's kind clusters
+func (m *Manager) printClusterStatusTable(opts *StatusOptions) error {
 	// get list of existing kind clusters
-	existingClusters, err := m.provider.List()
+	existingClusters, err := m.ListClusterNames()
 	if err != nil {
-		// check if error is due to no clusters found (docker command fails when no clusters exist)
-		// this is a valid state - treat as empty list and continue
-		errStr := err.Error()
-		if strings.Contains(errStr, "failed to list clusters") || strings.Contains(errStr, "exit status 1") {
-			existingClusters = []string{}
-		} else {
-			return fmt.Errorf("failed to list kind clusters: %w", err)
-		}
+		return fmt.Errorf("failed to list kind clusters: %w", err)
 	}
 
 	// create a map of existing cluster names for quick lookup
@@ -422,32 +427,25 @@ func (m *Manager) StatusClusters(opts *StatusOptions) error {
 	return nil
 }
 
-// ListClusters lists all kind clusters using the SDK
-func (m *Manager) ListClusters() error {
-	logger.Info("📋 Kind clusters:")
-
+// ListClusterNames returns the names of all existing Kind clusters using the SDK
+func (m *Manager) ListClusterNames() ([]string, error) {
+	// docker/podman exits 0 with an empty result when there are genuinely no
+	// clusters, so any error here reflects a real problem (e.g. the container
+	// runtime not running) and must not be swallowed as "no clusters".
 	clusters, err := m.provider.List()
 	if err != nil {
-		// Check if error is due to no clusters found (docker command fails when no clusters exist)
-		// This is a valid state, not an error
-		errStr := err.Error()
-		if strings.Contains(errStr, "failed to list clusters") || strings.Contains(errStr, "exit status 1") {
-			fmt.Println("No clusters found.")
-			return nil
+		// the wrapped error's own message is just "exit status 1"; the useful
+		// diagnostic (e.g. "failed to connect to the docker API...") is only
+		// available via the underlying RunError's captured command output
+		if runErr := kindexec.RunErrorForError(err); runErr != nil {
+			if output := strings.TrimSpace(string(runErr.Output)); output != "" {
+				return nil, errors.New(output)
+			}
 		}
-		return fmt.Errorf("failed to list kind clusters: %w", err)
+		return nil, err
 	}
 
-	if len(clusters) == 0 {
-		fmt.Println("No clusters found.")
-		return nil
-	}
-
-	for _, clusterName := range clusters {
-		fmt.Printf("  %s\n", clusterName)
-	}
-
-	return nil
+	return clusters, nil
 }
 
 // LoadImage loads a Docker image into kind clusters
@@ -470,16 +468,9 @@ func (m *Manager) LoadImage(opts *LoadImageOptions) error {
 		}
 
 		// verify cluster exists using SDK
-		existingClusters, err := m.provider.List()
+		existingClusters, err := m.ListClusterNames()
 		if err != nil {
-			// Check if error is due to no clusters found (docker command fails when no clusters exist)
-			// This is a valid state - treat as empty list and continue
-			errStr := err.Error()
-			if strings.Contains(errStr, "failed to list clusters") || strings.Contains(errStr, "exit status 1") {
-				existingClusters = []string{} // Treat as empty list
-			} else {
-				return fmt.Errorf("failed to list kind clusters: %w", err)
-			}
+			return fmt.Errorf("failed to list kind clusters: %w", err)
 		}
 
 		clusterExists := false
@@ -499,11 +490,11 @@ func (m *Manager) LoadImage(opts *LoadImageOptions) error {
 		status.Start(fmt.Sprintf("loading image %s into cluster %s (%d/%d)", opts.Image, clusterName, i, opts.NumClusters))
 
 		cmd := exec.Command(kindPath, "load", "docker-image", opts.Image, "--name", clusterName)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Run(); err != nil {
+		if output, err := util.RunCommand(cmd); err != nil {
 			status.End(false)
+			if output != "" {
+				return fmt.Errorf("failed to load image %s into cluster %s: %w: %s", opts.Image, clusterName, err, output)
+			}
 			return fmt.Errorf("failed to load image %s into cluster %s: %w", opts.Image, clusterName, err)
 		}
 

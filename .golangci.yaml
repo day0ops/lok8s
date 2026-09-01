@@ -100,6 +100,8 @@ linters:
           disabled: true
         - name: unexported-naming
           disabled: true
+        - name: package-naming
+          disabled: true
         - name: struct-tag
           disabled: true
         - name: redundant-import-alias

@@ -27,6 +27,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"text/tabwriter"
 
 	"github.com/day0ops/lok8s/pkg/util/docker"
 	"github.com/sirupsen/logrus"
@@ -61,6 +62,11 @@ Use '[config.AppName] --environment kind' to use kind instead.`, "[config.AppNam
 		return initializeConfig()
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// if invoked with no flags or arguments at all, show help instead of
+		// silently defaulting to cluster creation
+		if cmd.Flags().NFlag() == 0 && len(args) == 0 {
+			return cmd.Help()
+		}
 		// default behavior: run create command with the specified environment
 		return runCreateCommand(cmd, args)
 	},
@@ -568,33 +574,62 @@ func statusKindClusters(project string, numClusters int) error {
 	return manager.StatusClusters(opts)
 }
 
-// profileListCmd lists profiles/clusters
+// profileListCmd lists profiles/clusters across all supported environments
 func profileListCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "profile-list",
+		Use:   "list",
 		Short: "List all profiles/clusters",
-		Long:  `List all profiles for Minikube or clusters for Kind`,
+		Long:  `List all Minikube profiles and Kind clusters`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if environment == "minikube" {
-				return listMinikubeProfiles()
-			} else if environment == "kind" {
-				return listKindClusters()
-			}
-			return fmt.Errorf("invalid environment: %s", environment)
+			return listAllProfiles()
 		},
 	}
 
 	return cmd
 }
 
-func listMinikubeProfiles() error {
-	manager := minikube.NewManager()
-	return manager.ListProfiles()
+// profileEntry is a single row in the unified profile/cluster listing
+type profileEntry struct {
+	provider string
+	name     string
 }
 
-func listKindClusters() error {
-	manager := kind.NewManager()
-	return manager.ListClusters()
+// listAllProfiles lists Minikube profiles and Kind clusters together in a single, consistent table.
+// Each provider is checked on a best-effort basis: a failure checking one provider (e.g. its
+// tooling/runtime isn't set up) is logged at debug level rather than warn, so users who only use
+// one of the two providers don't see noise about the other by default. Use --verbose to see it.
+func listAllProfiles() error {
+	var entries []profileEntry
+
+	minikubeNames, err := minikube.NewManager().ListProfileNames()
+	if err != nil {
+		logger.Debugf("minikube: %v", err)
+	}
+	for _, name := range minikubeNames {
+		entries = append(entries, profileEntry{provider: "minikube", name: name})
+	}
+
+	kindNames, err := kind.NewManager().ListClusterNames()
+	if err != nil {
+		logger.Debugf("kind: %v", err)
+	}
+	for _, name := range kindNames {
+		entries = append(entries, profileEntry{provider: "kind", name: name})
+	}
+
+	if len(entries) == 0 {
+		fmt.Println("No profiles or clusters found.")
+		return nil
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "PROVIDER\tNAME")
+	for _, e := range entries {
+		fmt.Fprintf(w, "%s\t%s\n", e.provider, e.name)
+	}
+	w.Flush()
+
+	return nil
 }
 
 // imageLoadCmd loads Docker images into clusters

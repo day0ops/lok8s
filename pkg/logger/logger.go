@@ -77,6 +77,11 @@ func SetLevel(level logrus.Level) {
 	log.SetLevel(level)
 }
 
+// Verbose reports whether debug-level logging is enabled (set via --verbose)
+func Verbose() bool {
+	return log.IsLevelEnabled(logrus.DebugLevel)
+}
+
 // GetLogger returns the configured logger instance
 func GetLogger() *logrus.Logger {
 	return log

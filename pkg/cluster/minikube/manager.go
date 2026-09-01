@@ -25,6 +25,7 @@ package minikube
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,6 +40,7 @@ import (
 	"github.com/day0ops/lok8s/pkg/logger"
 	"github.com/day0ops/lok8s/pkg/network"
 	"github.com/day0ops/lok8s/pkg/services"
+	"github.com/day0ops/lok8s/pkg/util"
 	"github.com/day0ops/lok8s/pkg/util/helm"
 	"github.com/day0ops/lok8s/pkg/util/k8s"
 	"github.com/day0ops/lok8s/pkg/util/version"
@@ -432,25 +434,12 @@ func (m *Manager) deleteCluster(binaryPath, clusterName string, force bool) erro
 	}
 	cmd := exec.Command(binaryPath, args...)
 
-	// capture stderr to show actual error messages
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-
-	// suppress stdout during deletion since spinner provides feedback
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err == nil {
-		cmd.Stdout = devNull
-		defer devNull.Close()
-	} else {
-		// fallback to logger output if DevNull is not available
-		cmd.Stdout = logger.GetLogger().Out
-	}
-
-	err = cmd.Run()
+	// only stream minikube's own output live when verbose logging is enabled;
+	// otherwise capture it silently and surface it if the command fails
+	output, err := util.RunCommand(cmd)
 	if err != nil {
-		// include stderr in error message for better debugging
-		if stderr.Len() > 0 {
-			return fmt.Errorf("%w: %s", err, stderr.String())
+		if output != "" {
+			return fmt.Errorf("%w: %s", err, output)
 		}
 		return err
 	}
@@ -611,10 +600,18 @@ func (m *Manager) checkVfkitInstalled() error {
 // getMinikubeK8sVersion returns the appropriate Kubernetes version for minikube
 func (m *Manager) getMinikubeK8sVersion(k8sVersion string) (string, error) {
 	if k8sVersion == "stable" {
-		// get the latest version
-		for _, version := range config.MinikubeK8sVersions {
-			return fmt.Sprintf("v%s", version), nil
+		// get the latest version (highest minor key, which should be the newest supported release)
+		var latestMinor, latestVersion string
+		for minor, version := range config.MinikubeK8sVersions {
+			if latestMinor == "" || minor > latestMinor {
+				latestMinor = minor
+				latestVersion = version
+			}
 		}
+		if latestVersion == "" {
+			return "", fmt.Errorf("no Kubernetes versions available")
+		}
+		return fmt.Sprintf("v%s", latestVersion), nil
 	}
 
 	// extract minor version (e.g., "1.31" from "1.31.2")
@@ -717,12 +714,13 @@ func (m *Manager) createCluster(clusterName, k8sVersion, driver, cpu, memory, di
 	status.Start(fmt.Sprintf("creating Minikube cluster %s", clusterName))
 
 	cmd := exec.Command(binaryPath, args...)
-	// Redirect minikube output through the logger so it properly clears the spinner line
-	cmd.Stdout = logger.GetLogger().Out
-	cmd.Stderr = logger.GetLogger().Out
-
-	if err := cmd.Run(); err != nil {
+	// only stream minikube's own output live when verbose logging is enabled;
+	// otherwise capture it silently and surface it if the command fails
+	if output, err := util.RunCommand(cmd); err != nil {
 		status.End(false)
+		if output != "" {
+			return fmt.Errorf("failed to start minikube cluster: %w: %s", err, output)
+		}
 		return fmt.Errorf("failed to start minikube cluster: %w", err)
 	}
 
@@ -769,16 +767,14 @@ func (m *Manager) showProfileList() error {
 		return fmt.Errorf("failed to get minikube binary path: %w", err)
 	}
 
-	logger.Info("📋 Minikube profiles:")
-
+	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(binaryPath, "profile", "list")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
 		// Check if exit code is 14 (MK_USAGE_NO_PROFILE - no profiles found)
-		// or if error message contains MK_USAGE_NO_PROFILE
-		errStr := err.Error()
+		// or if stderr contains MK_USAGE_NO_PROFILE
 		isNoProfile := false
 
 		if exitError, ok := err.(*exec.ExitError); ok {
@@ -787,25 +783,69 @@ func (m *Manager) showProfileList() error {
 			}
 		}
 
-		if !isNoProfile && strings.Contains(errStr, "MK_USAGE_NO_PROFILE") {
+		if !isNoProfile && strings.Contains(stderr.String(), "MK_USAGE_NO_PROFILE") {
 			isNoProfile = true
 		}
 
 		if isNoProfile {
-			// No profiles found - this is a valid state, not an error
+			// No profiles found - this is a valid state, not an error, and minikube's
+			// own noisy exit message is intentionally suppressed
 			fmt.Println("No profiles found.")
 			return nil
 		}
 
+		if stderr.Len() > 0 {
+			return fmt.Errorf("failed to list minikube profiles: %w: %s", err, stderr.String())
+		}
 		return fmt.Errorf("failed to list minikube profiles: %w", err)
 	}
 
+	fmt.Print(stdout.String())
 	return nil
 }
 
-// ListProfiles lists all minikube profiles
-func (m *Manager) ListProfiles() error {
-	return m.showProfileList()
+// minikubeProfile mirrors the relevant fields of `minikube profile list -o json` entries
+type minikubeProfile struct {
+	Name string `json:"Name"`
+}
+
+// minikubeProfileList mirrors the JSON structure returned by `minikube profile list -o json`
+type minikubeProfileList struct {
+	Valid []minikubeProfile `json:"valid"`
+}
+
+// ListProfileNames returns the names of all existing minikube profiles
+func (m *Manager) ListProfileNames() ([]string, error) {
+	binaryPath, err := m.binaryManager.GetBinaryPath()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get minikube binary path: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(binaryPath, "profile", "list", "-o", "json")
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	// unlike the table output, the JSON output exits 0 with an empty "valid"
+	// list when no profiles exist, so no special no-profile handling is needed
+	if err := cmd.Run(); err != nil {
+		if stderr.Len() > 0 {
+			return nil, fmt.Errorf("failed to list minikube profiles: %w: %s", err, stderr.String())
+		}
+		return nil, fmt.Errorf("failed to list minikube profiles: %w", err)
+	}
+
+	var result minikubeProfileList
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		return nil, fmt.Errorf("failed to parse minikube profile list: %w", err)
+	}
+
+	names := make([]string, 0, len(result.Valid))
+	for _, p := range result.Valid {
+		names = append(names, p.Name)
+	}
+
+	return names, nil
 }
 
 // LoadImage loads a Docker image into minikube clusters
@@ -835,11 +875,11 @@ func (m *Manager) LoadImage(opts *LoadImageOptions) error {
 		status.Start(fmt.Sprintf("loading image %s into cluster %s (%d/%d)", opts.Image, clusterName, i, opts.NumClusters))
 
 		cmd := exec.Command(binaryPath, "image", "load", opts.Image, "-p", clusterName)
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-
-		if err := cmd.Run(); err != nil {
+		if output, err := util.RunCommand(cmd); err != nil {
 			status.End(false)
+			if output != "" {
+				return fmt.Errorf("failed to load image %s into cluster %s: %w: %s", opts.Image, clusterName, err, output)
+			}
 			return fmt.Errorf("failed to load image %s into cluster %s: %w", opts.Image, clusterName, err)
 		}
 
@@ -885,35 +925,33 @@ func (m *Manager) enableCSI(clusterName string) error {
 
 	// enable volumesnapshots addon
 	cmd := exec.Command(binaryPath, "addons", "enable", "volumesnapshots", "-p", clusterName)
-	cmd.Stdout = logger.GetLogger().Out
-	cmd.Stderr = logger.GetLogger().Out
-	if err := cmd.Run(); err != nil {
+	if output, err := util.RunCommand(cmd); err != nil {
 		status.End(false)
+		if output != "" {
+			return fmt.Errorf("failed to enable volumesnapshots addon: %w: %s", err, output)
+		}
 		return fmt.Errorf("failed to enable volumesnapshots addon: %w", err)
 	}
 
 	// enable csi-hostpath-driver addon
 	cmd = exec.Command(binaryPath, "addons", "enable", "csi-hostpath-driver", "-p", clusterName)
-	cmd.Stdout = logger.GetLogger().Out
-	cmd.Stderr = logger.GetLogger().Out
-	if err := cmd.Run(); err != nil {
+	if output, err := util.RunCommand(cmd); err != nil {
 		status.End(false)
+		if output != "" {
+			return fmt.Errorf("failed to enable csi-hostpath-driver addon: %w: %s", err, output)
+		}
 		return fmt.Errorf("failed to enable csi-hostpath-driver addon: %w", err)
 	}
 
 	// disable storage-provisioner addon
 	cmd = exec.Command(binaryPath, "addons", "disable", "storage-provisioner", "-p", clusterName)
-	cmd.Stdout = logger.GetLogger().Out
-	cmd.Stderr = logger.GetLogger().Out
-	if err := cmd.Run(); err != nil {
+	if _, err := util.RunCommand(cmd); err != nil {
 		logger.Debugf("failed to disable storage-provisioner addon (may not be enabled): %v", err)
 	}
 
 	// disable default-storageclass addon
 	cmd = exec.Command(binaryPath, "addons", "disable", "default-storageclass", "-p", clusterName)
-	cmd.Stdout = logger.GetLogger().Out
-	cmd.Stderr = logger.GetLogger().Out
-	if err := cmd.Run(); err != nil {
+	if _, err := util.RunCommand(cmd); err != nil {
 		logger.Debugf("failed to disable default-storageclass addon (may not be enabled): %v", err)
 	}
 
@@ -967,10 +1005,11 @@ func (m *Manager) enableMetricsServer(clusterName string) error {
 
 	// enable metrics-server addon
 	cmd := exec.Command(binaryPath, "addons", "enable", "metrics-server", "-p", clusterName)
-	cmd.Stdout = logger.GetLogger().Out
-	cmd.Stderr = logger.GetLogger().Out
-	if err := cmd.Run(); err != nil {
+	if output, err := util.RunCommand(cmd); err != nil {
 		status.End(false)
+		if output != "" {
+			return fmt.Errorf("failed to enable metrics-server addon: %w: %s", err, output)
+		}
 		return fmt.Errorf("failed to enable metrics-server addon: %w", err)
 	}
 
