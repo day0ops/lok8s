@@ -77,6 +77,16 @@ const (
 	NativeCPU                          = "2"
 	NativeMemory                       = "2G"
 
+	// Native on Linux (Incus) defaults. Unlike the macOS side, these haven't
+	// been verified against a real Incus install (see incus_client.go) - the
+	// version floor and image reference are best-effort defaults, not
+	// confirmed-working values.
+	NativeLinuxMinIncusVersion = "6.0"
+	NativeLinuxBaseImage       = "images:debian/12"
+	// NativeLinuxMemory uses Incus's "GiB" unit syntax; NativeCPU above is
+	// reused as-is since a bare number is valid for both platforms.
+	NativeLinuxMemory = "2GiB"
+
 	// LibVirt network template
 	NetworkTemplate = `
 <network>
