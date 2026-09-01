@@ -25,6 +25,7 @@ package native
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -35,6 +36,19 @@ import (
 
 // containerBinary is the Apple `container` CLI (github.com/apple/container).
 const containerBinary = "container"
+
+// wrapOutputError enriches an error from exec.Cmd.Output() with any captured
+// stderr. Output() attaches up to 32KB of stderr to *exec.ExitError, but the
+// error's own Error() method doesn't include it - without this, CLI failures
+// like "container system services aren't running" surface to the user as an
+// unhelpful bare "exit status 1".
+func wrapOutputError(err error) error {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+	}
+	return err
+}
 
 // ContainerClient wraps the `container` CLI for driving Apple's native
 // Containerization VMs. It is a thin exec wrapper, not a client library,
@@ -99,7 +113,7 @@ func (c *ContainerClient) Version() (string, error) {
 	cmd := exec.Command(containerBinary, "--version")
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("failed to run '%s --version': %w", containerBinary, err)
+		return "", fmt.Errorf("failed to run '%s --version': %w", containerBinary, wrapOutputError(err))
 	}
 
 	// output looks like: "container CLI version 1.3.0 (build: release, commit: unspecified)"
@@ -113,11 +127,15 @@ func (c *ContainerClient) Version() (string, error) {
 	return "", fmt.Errorf("unable to parse container CLI version from: %s", strings.TrimSpace(string(output)))
 }
 
-// SystemRunning reports whether the `container` system services (apiserver, etc.) are running
+// SystemRunning reports whether the `container` system services (apiserver, etc.) are running.
+// A false result is ambiguous by design (not running vs. a status check that
+// itself failed) since callers only ever need "is it safe to proceed", but the
+// actual failure is logged at debug level so --verbose can distinguish them.
 func (c *ContainerClient) SystemRunning() bool {
 	cmd := exec.Command(containerBinary, "system", "status", "--format", "json")
 	output, err := cmd.Output()
 	if err != nil {
+		logger.Debugf("container system status check failed: %v", wrapOutputError(err))
 		return false
 	}
 
@@ -125,6 +143,7 @@ func (c *ContainerClient) SystemRunning() bool {
 		Status string `json:"status"`
 	}
 	if err := json.Unmarshal(output, &status); err != nil {
+		logger.Debugf("failed to parse container system status output: %v", err)
 		return false
 	}
 
@@ -136,7 +155,7 @@ func (c *ContainerClient) listNetworks() ([]networkEntry, error) {
 	cmd := exec.Command(containerBinary, "network", "list", "--format", "json")
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list container networks: %w", err)
+		return nil, fmt.Errorf("failed to list container networks: %w", wrapOutputError(err))
 	}
 
 	var entries []networkEntry
@@ -211,7 +230,12 @@ func (c *ContainerClient) DeleteNetwork(name string) error {
 	cmd := exec.Command(containerBinary, "network", "delete", name)
 	output, err := util.RunCommand(cmd)
 	if err != nil {
-		if strings.Contains(output, "not found") {
+		// the CLI's error text for "doesn't exist" doesn't contain a stable,
+		// greppable substring (observed: `failed to delete one or more
+		// networks: ["name"]`, indistinguishable by text from other
+		// failures), so check the actual state instead of pattern-matching
+		// the error message
+		if exists, existsErr := c.NetworkExists(name); existsErr == nil && !exists {
 			logger.Debugf("network %s already deleted", name)
 			return nil
 		}
@@ -267,9 +291,9 @@ func (c *ContainerClient) Exec(nodeName string, args ...string) (string, error) 
 
 	if err := cmd.Run(); err != nil {
 		if stderr.Len() > 0 {
-			return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
+			return "", fmt.Errorf("failed to exec %q on node %s: %w: %s", strings.Join(args, " "), nodeName, err, strings.TrimSpace(stderr.String()))
 		}
-		return "", err
+		return "", fmt.Errorf("failed to exec %q on node %s: %w", strings.Join(args, " "), nodeName, err)
 	}
 
 	return stdout.String(), nil
@@ -280,7 +304,7 @@ func (c *ContainerClient) inspect(nodeName string) (*containerInspectEntry, erro
 	cmd := exec.Command(containerBinary, "inspect", nodeName)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to inspect node %s: %w", nodeName, err)
+		return nil, fmt.Errorf("failed to inspect node %s: %w", nodeName, wrapOutputError(err))
 	}
 
 	var entries []containerInspectEntry
@@ -327,7 +351,7 @@ func (c *ContainerClient) ListNodeNames(prefix string) ([]string, error) {
 	cmd := exec.Command(containerBinary, "list", "-a", "--format", "json")
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("failed to list containers: %w", err)
+		return nil, fmt.Errorf("failed to list containers: %w", wrapOutputError(err))
 	}
 
 	var entries []containerInspectEntry
