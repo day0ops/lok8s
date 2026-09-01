@@ -95,6 +95,38 @@ func mergeKubeconfig(tempName string, raw []byte) error {
 	return nil
 }
 
+// clearClusterCA removes the embedded CA certificate data for a cluster
+// entry. This is required after k8s.UpdateClusterServer marks a cluster
+// insecureSkipTLSVerify: client-go's clientcmd rejects a kubeconfig that
+// combines insecure-skip-tls-verify with certificate-authority-data, and
+// native's control-plane server address (its routable VM IP) isn't known
+// until after boot, so it can't have been part of the certificate's SAN
+// list generated at first start.
+func clearClusterCA(clusterName string) error {
+	path, err := kubeconfigPath()
+	if err != nil {
+		return err
+	}
+
+	sharedConfig, err := clientcmd.LoadFromFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to load kubeconfig: %w", err)
+	}
+
+	cluster, ok := sharedConfig.Clusters[clusterName]
+	if !ok {
+		return fmt.Errorf("cluster %s not found in kubeconfig", clusterName)
+	}
+	cluster.CertificateAuthorityData = nil
+	cluster.CertificateAuthority = ""
+
+	if err := clientcmd.WriteToFile(*sharedConfig, path); err != nil {
+		return fmt.Errorf("failed to write kubeconfig: %w", err)
+	}
+
+	return nil
+}
+
 // loadOrCreateKubeconfig loads the kubeconfig at path, or returns a fresh
 // empty config (creating the parent directory) if it doesn't exist yet
 func loadOrCreateKubeconfig(path string) (*clientcmdapi.Config, error) {

@@ -88,10 +88,13 @@ func NewManager() *Manager {
 	helmManager := helm.NewHelmManager(k8sConfigPath)
 
 	return &Manager{
-		client:         NewContainerClient(),
-		helmManager:    helmManager,
-		ciliumManager:  services.NewCiliumManager(helmManager, nil), // native doesn't need a binary manager
-		metallbManager: services.NewMetalLBManager(helmManager),
+		client:        NewContainerClient(),
+		helmManager:   helmManager,
+		ciliumManager: services.NewCiliumManager(helmManager, nil), // native doesn't need a binary manager
+		// native nodes are directly IP-addressable on the project's routable
+		// network (like minikube's VMs), unlike kind's NAT'd Docker network,
+		// so it uses the same bounded octet range minikube does
+		metallbManager: services.NewMetalLBManagerWithOptions(helmManager, config.MetalLBRangeMinLastOctet, config.MetalLBRangeMaxLastOctet),
 	}
 }
 
@@ -135,6 +138,28 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
 		}
 
+		// Cilium must install before MetalLB: unlike kind/minikube's shared-kernel
+		// containers, native nodes have no pod networking at all until Cilium is
+		// up, and MetalLB's controller/speaker pods (unlike Cilium's own
+		// daemonset, which runs on the host network) need it to reach Ready -
+		// installing MetalLB first would otherwise hang until its own helm
+		// install timeout.
+		//
+		// kubeProxyReplacement is also required: cross-node pod traffic to a
+		// ClusterIP backed by a host-networked pod (like k3s's own apiserver
+		// Service) hangs on TLS handshakes under kube-proxy's iptables DNAT
+		// in this environment. k3s's own kube-proxy is left running (see
+		// controlPlaneArgs) since Cilium's replacement intercepts ahead of
+		// it once up, without leaving a gap before Cilium itself is ready.
+		ciliumValues := map[string]interface{}{
+			"kubeProxyReplacement": true,
+			"k8sServiceHost":       cpIP,
+			"k8sServicePort":       k3sAPIPort,
+		}
+		if err := m.ciliumManager.InstallCiliumWithValues(contextName, ciliumValues); err != nil {
+			logger.Errorf("failed to install Cilium on %s: %v", contextName, err)
+		}
+
 		if opts.InstallMetalLB {
 			// initialize tracking before first cluster configuration
 			if i == 1 {
@@ -143,17 +168,33 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 				}
 			}
 
-			if err := m.metallbManager.InstallMetalLB(contextName); err != nil {
+			// pin the controller to the control-plane node: the apiserver's
+			// admission webhook calls to it hang when it lands on a worker
+			// node, the same cross-node-to-remote-pod-IP hang diagnosed for
+			// the apiserver's own Service traffic above, but this path
+			// (a direct apiserver-to-endpoint-IP dial for webhook calls)
+			// isn't covered by Cilium's kube-proxy replacement since it
+			// bypasses Service resolution entirely.
+			metallbValues := map[string]interface{}{
+				"controller": map[string]interface{}{
+					"resources": map[string]interface{}{
+						"requests": map[string]interface{}{
+							"cpu":    "100m",
+							"memory": "100Mi",
+						},
+					},
+					"nodeSelector": map[string]interface{}{
+						"node-role.kubernetes.io/control-plane": "true",
+					},
+				},
+			}
+			if err := m.metallbManager.InstallMetalLBWithValues(contextName, metallbValues); err != nil {
 				logger.Errorf("failed to install MetalLB on %s: %v", contextName, err)
 			} else {
 				if err := m.metallbManager.ConfigureMetalLB(contextName, cpIP, i, opts.NumClusters, opts.Project); err != nil {
 					logger.Errorf("failed to configure MetalLB on %s: %v", contextName, err)
 				}
 			}
-		}
-
-		if err := m.ciliumManager.InstallCilium(contextName); err != nil {
-			logger.Errorf("failed to install Cilium on %s: %v", contextName, err)
 		}
 	}
 
@@ -363,6 +404,10 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 		status.End(false)
 		return "", fmt.Errorf("failed to boot control-plane node: %w", err)
 	}
+	if err := makeRootMountShared(m.client, cpNodeName); err != nil {
+		status.End(false)
+		return "", err
+	}
 	status.End(true)
 
 	cpIP, err := m.waitForNodeIP(cpNodeName, networkName, 2*time.Minute)
@@ -398,6 +443,10 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 			statusW.End(false)
 			return "", fmt.Errorf("failed to boot worker node %s: %w", workerName, err)
 		}
+		if err := makeRootMountShared(m.client, workerName); err != nil {
+			statusW.End(false)
+			return "", err
+		}
 		statusW.End(true)
 	}
 
@@ -417,7 +466,7 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 	// readiness wait (which just polls DaemonSet desired == ready) doesn't
 	// converge early against a control-plane-only node set while workers are
 	// still joining
-	if err := m.waitForNodeCount(contextName, opts.NodeCount+1, 3*time.Minute); err != nil {
+	if err := m.waitForNodeCount(contextName, opts.NodeCount+1, 5*time.Minute); err != nil {
 		return "", err
 	}
 
@@ -435,9 +484,16 @@ func (m *Manager) waitForNodeCount(contextName string, expected int, timeout tim
 
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		nodes, err := clientManager.GetClientset().CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
-		if err == nil && len(nodes.Items) >= expected {
-			return nil
+		listCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		nodes, err := clientManager.GetClientset().CoreV1().Nodes().List(listCtx, metav1.ListOptions{})
+		cancel()
+		if err != nil {
+			logger.Debugf("waitForNodeCount: list nodes failed: %v", err)
+		} else {
+			logger.Debugf("waitForNodeCount: %d/%d nodes registered", len(nodes.Items), expected)
+			if len(nodes.Items) >= expected {
+				return nil
+			}
 		}
 		time.Sleep(3 * time.Second)
 	}
@@ -468,6 +524,10 @@ func (m *Manager) mergeClusterKubeconfig(clusterName, contextName, cpNodeName, c
 	serverURL := fmt.Sprintf("https://%s:%d", cpIP, k3sAPIPort)
 	if err := k8s.UpdateClusterServer(clusterName, serverURL, true); err != nil {
 		return fmt.Errorf("failed to update cluster server URL: %w", err)
+	}
+
+	if err := clearClusterCA(clusterName); err != nil {
+		return fmt.Errorf("failed to clear cluster CA data: %w", err)
 	}
 
 	return nil

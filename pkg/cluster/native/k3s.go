@@ -53,6 +53,16 @@ func generateClusterToken() (string, error) {
 // to Cilium; --disable=traefik and --disable=servicelb are required, not
 // optional, since k3s's own ServiceLB/Klipper would otherwise fight MetalLB
 // for LoadBalancer Services, and Traefik would squat on ports 80/443.
+// kube-proxy is intentionally left running (see the kubeProxyReplacement
+// values passed alongside InstallCilium): cross-node pod traffic to a
+// ClusterIP backed by a host-networked pod (like k3s's own apiserver Service)
+// hangs on TLS handshakes under kube-proxy's iptables DNAT in this
+// environment, so Cilium's socket-based kube-proxy replacement is used
+// instead - but disabling kube-proxy outright at boot leaves nothing routing
+// Services during the window before Cilium's own agents finish starting,
+// breaking coredns and friends. Running both is redundant, not conflicting:
+// Cilium's replacement intercepts at the socket layer ahead of kube-proxy's
+// iptables rules once it's up.
 func controlPlaneArgs(token, nodeName, tlsSAN string) []string {
 	return []string{
 		"server",
@@ -75,6 +85,19 @@ func workerArgs(serverURL, token, nodeName string) []string {
 		"--token", token,
 		"--node-name", nodeName,
 	}
+}
+
+// makeRootMountShared marks a node VM's root mount as shared (rshared)
+// propagation. Apple's Containerization stack boots each node with the root
+// mount as private propagation, which breaks Cilium's mount-bpf-fs init
+// container ("path \"/sys/fs/bpf\" is mounted on \"/sys\" but it is not a
+// shared mount"). This must run before any pod that needs a shared bpf
+// mount - i.e. before Cilium - gets scheduled onto the node.
+func makeRootMountShared(client *ContainerClient, nodeName string) error {
+	if _, err := client.Exec(nodeName, "mount", "--make-rshared", "/"); err != nil {
+		return fmt.Errorf("failed to mark root mount shared on %s: %w", nodeName, err)
+	}
+	return nil
 }
 
 // waitForInVMReady polls the control-plane node from inside its own VM until
