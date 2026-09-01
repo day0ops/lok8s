@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -82,6 +83,51 @@ type LoadImageOptions struct {
 	NumClusters int
 }
 
+// clusterAndContextName returns the native cluster name (used as the prefix
+// for node container names) and kubeconfig context name for the i-th cluster
+// of a project. Both are project-scoped so that two different projects never
+// collide on the same underlying node container names.
+func clusterAndContextName(project string, numClusters, i int) (clusterName, contextName string) {
+	if numClusters == 1 {
+		// if only one cluster, don't add suffix
+		return project, project
+	}
+	name := fmt.Sprintf("%s-%d", project, i)
+	return name, name
+}
+
+// nodeNamesForCluster returns the existing node container names that belong
+// to clusterName specifically: clusterName+"-control-plane", and any
+// clusterName+"-worker-N". A bare prefix match isn't precise enough now that
+// cluster names are project-scoped - it would also match an unrelated
+// cluster whose name happens to start with clusterName followed by a hyphen
+// (e.g. "myproject" matching "myproject-2-control-plane" from a different,
+// unrelated project literally named "myproject-2").
+func (m *Manager) nodeNamesForCluster(clusterName string) ([]string, error) {
+	candidates, err := m.client.ListNodeNames(clusterName + "-")
+	if err != nil {
+		return nil, err
+	}
+
+	cpName := clusterName + "-control-plane"
+	workerPrefix := clusterName + "-worker-"
+
+	var matched []string
+	for _, name := range candidates {
+		if name == cpName {
+			matched = append(matched, name)
+			continue
+		}
+		if suffix, ok := strings.CutPrefix(name, workerPrefix); ok {
+			if _, err := strconv.Atoi(suffix); err == nil {
+				matched = append(matched, name)
+			}
+		}
+	}
+
+	return matched, nil
+}
+
 // NewManager creates a new native manager
 func NewManager() *Manager {
 	k8sConfigPath, _ := k8s.GetKubeConfigPath()
@@ -123,15 +169,7 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	}
 
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "native1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("native%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
 
 		cpIP, err := m.createCluster(clusterName, contextName, image, networkName, opts)
 		if err != nil {
@@ -212,20 +250,13 @@ func (m *Manager) DeleteClusters(opts *DeleteOptions) error {
 	logger.Infof("-----> 🚨 deleting %d native cluster(s) for project %s <-----", opts.NumClusters, opts.Project)
 
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			clusterName = "native1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("native%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
 
 		status := logger.NewStatus()
 		status.Start(fmt.Sprintf("deleting native cluster %s", clusterName))
 		success := true
 
-		nodeNames, err := m.client.ListNodeNames(clusterName + "-")
+		nodeNames, err := m.nodeNamesForCluster(clusterName)
 		if err != nil {
 			success = false
 			logger.Errorf("failed to list nodes for cluster %s: %v", clusterName, err)
@@ -364,7 +395,7 @@ func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
 func (m *Manager) createCluster(clusterName, contextName, image, networkName string, opts *CreateOptions) (string, error) {
 	cpNodeName := clusterName + "-control-plane"
 
-	existingNodes, err := m.client.ListNodeNames(clusterName + "-")
+	existingNodes, err := m.nodeNamesForCluster(clusterName)
 	if err != nil {
 		return "", fmt.Errorf("failed to check for existing nodes: %w", err)
 	}
@@ -517,8 +548,12 @@ func (m *Manager) mergeClusterKubeconfig(clusterName, contextName, cpNodeName, c
 		return fmt.Errorf("failed to merge kubeconfig: %w", err)
 	}
 
-	if err := k8s.RenameContext(clusterName, contextName); err != nil {
-		return fmt.Errorf("failed to rename context: %w", err)
+	// clusterName and contextName are equal for single-cluster projects (both
+	// are just the project name), so the rename would be a no-op
+	if clusterName != contextName {
+		if err := k8s.RenameContext(clusterName, contextName); err != nil {
+			return fmt.Errorf("failed to rename context: %w", err)
+		}
 	}
 
 	serverURL := fmt.Sprintf("https://%s:%d", cpIP, k3sAPIPort)
@@ -564,14 +599,7 @@ func (m *Manager) printClusterStatusTable(opts *StatusOptions) error {
 	var statuses []clusterStatus
 
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			clusterName = "native1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("native%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
 
 		cpNodeName := clusterName + "-control-plane"
 
