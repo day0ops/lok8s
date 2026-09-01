@@ -83,6 +83,14 @@ type LoadImageOptions struct {
 	NumClusters int
 }
 
+// projectNetworkName returns the `container network` name for a project.
+// `container network create` rejects names with uppercase letters, unlike
+// project names themselves which are free-form, so this normalizes to
+// lowercase.
+func projectNetworkName(project string) string {
+	return config.NativeNetworkNamePrefix + strings.ToLower(project)
+}
+
 // clusterAndContextName returns the native cluster name (used as the prefix
 // for node container names) and kubeconfig context name for the i-th cluster
 // of a project. Both are project-scoped so that two different projects never
@@ -278,7 +286,7 @@ func (m *Manager) DeleteClusters(opts *DeleteOptions) error {
 	// the project network is shared by every cluster in the project, so only
 	// tear it down when the caller explicitly asks for a full cleanup
 	if opts.Force {
-		networkName := config.NativeNetworkNamePrefix + opts.Project
+		networkName := projectNetworkName(opts.Project)
 		if err := m.client.DeleteNetwork(networkName); err != nil {
 			logger.Warnf("failed to delete network %s: %v", networkName, err)
 		} else {
@@ -362,7 +370,7 @@ func (m *Manager) checkPrerequisites() error {
 // another project's network. opts.SubnetCIDR is updated to whichever subnet
 // actually ends up in use, so the caller can persist it.
 func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
-	networkName := config.NativeNetworkNamePrefix + opts.Project
+	networkName := projectNetworkName(opts.Project)
 
 	exists, err := m.client.NetworkExists(networkName)
 	if err != nil {
@@ -587,7 +595,7 @@ func (m *Manager) waitForNodeIP(nodeName, networkName string, timeout time.Durat
 
 // printClusterStatusTable builds and prints a status table for the given project's native clusters
 func (m *Manager) printClusterStatusTable(opts *StatusOptions) error {
-	networkName := config.NativeNetworkNamePrefix + opts.Project
+	networkName := projectNetworkName(opts.Project)
 
 	type clusterStatus struct {
 		clusterName string
