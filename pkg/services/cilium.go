@@ -56,6 +56,15 @@ func NewCiliumManager(helmManager *helm.HelmManager, binaryManager BinaryManager
 
 // InstallCilium installs Cilium using Helm
 func (cm *CiliumManager) InstallCilium(clusterName string) error {
+	return cm.InstallCiliumWithValues(clusterName, nil)
+}
+
+// InstallCiliumWithValues installs Cilium using Helm, merging extraValues over
+// the defaults (extraValues may be nil). This lets callers with topologies
+// that need a non-default install - e.g. the native provider, which disables
+// k3s's own kube-proxy in favor of Cilium's kube-proxy replacement - adjust
+// the install without duplicating the repository-add/install/wait sequence.
+func (cm *CiliumManager) InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error {
 	status := logger.NewStatus()
 	status.Start(fmt.Sprintf("installing Cilium on cluster %s", clusterName))
 	defer func() {
@@ -79,6 +88,9 @@ func (cm *CiliumManager) InstallCilium(clusterName string) error {
 		"cni": map[string]interface{}{
 			"exclusive": false,
 		},
+	}
+	for k, v := range extraValues {
+		values[k] = v
 	}
 
 	if err := cm.helmManager.InstallChart("cilium", "cilium/cilium", "kube-system", values, 5*time.Minute); err != nil {
