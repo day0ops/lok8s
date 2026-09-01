@@ -162,11 +162,15 @@ func (cm *CiliumManager) WaitForCiliumReady(clusterName string) error {
 			}
 		}
 
-		// check operator readiness
+		// check operator readiness - the operator uses leader election for HA,
+		// so at least one ready replica is sufficient for full functionality;
+		// requiring every replica to be ready would hang forever on a
+		// single-node cluster, where pod anti-affinity keeps the second
+		// replica permanently unscheduled
 		operatorReady := false
 		if len(deployments.Items) > 0 {
 			deployment := deployments.Items[0]
-			if deployment.Status.ReadyReplicas > 0 && deployment.Status.ReadyReplicas == *deployment.Spec.Replicas {
+			if deployment.Status.ReadyReplicas > 0 {
 				operatorReady = true
 			}
 		}
