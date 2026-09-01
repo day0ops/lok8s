@@ -71,6 +71,12 @@ const (
 
 	CloudProviderKindMinSupportedVersion = "0.8.0"
 
+	// Native (Apple Virtualization / `container` CLI) defaults
+	NativeContainerMinSupportedVersion = "1.2.1"
+	NativeNetworkNamePrefix            = "lok8s-"
+	NativeCPU                          = "2"
+	NativeMemory                       = "2G"
+
 	// LibVirt network template
 	NetworkTemplate = `
 <network>
@@ -108,6 +114,14 @@ var (
 		"1.34": "1.34.0",
 		"1.33": "1.33.1",
 		"1.32": "1.32.6",
+	}
+
+	// k3s image tags, see https://github.com/k3s-io/k3s/releases
+	NativeK8sVersions = map[string]string{
+		"1.36": "1.36.4+k3s1",
+		"1.35": "1.35.8+k3s1",
+		"1.34": "1.34.11+k3s1",
+		"1.33": "1.33.13+k3s2",
 	}
 
 	KindRegistries = map[string]string{
