@@ -91,6 +91,49 @@ type LoadImageOptions struct {
 	NumClusters int
 }
 
+// clusterAndContextName returns the kind cluster name and kubeconfig context
+// name for the i-th cluster of a project. Both are project-scoped so that
+// two different projects never collide on the same underlying kind/docker
+// cluster name, matching minikube's existing naming.
+func clusterAndContextName(project string, numClusters, i int) (clusterName, contextName string) {
+	if numClusters == 1 {
+		// if only one cluster, don't add suffix
+		return project, project
+	}
+	name := fmt.Sprintf("%s-%d", project, i)
+	return name, name
+}
+
+// legacyClusterName returns the kind cluster name lok8s used before cluster
+// names were made project-scoped (always "kind1", "kind2", ... regardless of
+// project). It's only used as a fallback when looking up clusters created by
+// an older lok8s version, so status/delete/image-load keep working for them.
+func legacyClusterName(i int) string {
+	return fmt.Sprintf("kind%d", i)
+}
+
+// resolveExistingClusterName returns clusterName if it's already present in
+// existingClusters, otherwise falls back to the legacy pre-project-scoping
+// name if that's what's actually running, so status/delete/image-load keep
+// finding clusters created by an older lok8s version. If neither is found,
+// clusterName (the current scheme) is returned as-is.
+func resolveExistingClusterName(existingClusters []string, clusterName string, i int) string {
+	legacy := legacyClusterName(i)
+	foundLegacy := false
+	for _, c := range existingClusters {
+		if c == clusterName {
+			return clusterName
+		}
+		if c == legacy {
+			foundLegacy = true
+		}
+	}
+	if foundLegacy {
+		return legacy
+	}
+	return clusterName
+}
+
 // getAvailablePortPrefix finds an available port prefix in the 70XX range, if not search for an available port
 func getAvailablePortPrefix(clusterIndex int) (string, error) {
 	// try the preferred port first (70XX where XX is cluster index)
@@ -194,15 +237,7 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 
 	// create clusters
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "kind1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("kind%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
 
 		if err := m.createCluster(clusterName, contextName, kindestNode, opts.NodeCount, i, opts, regPort); err != nil {
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
@@ -260,16 +295,14 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 func (m *Manager) DeleteClusters(opts *DeleteOptions) error {
 	logger.Infof("-----> 🚨 deleting %d Kind cluster(s) for project %s <-----", opts.NumClusters, opts.Project)
 
+	existingClusters, err := m.ListClusterNames()
+	if err != nil {
+		logger.Debugf("failed to list existing kind clusters (non-fatal): %v", err)
+	}
+
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "kind1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("kind%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
+		clusterName = resolveExistingClusterName(existingClusters, clusterName, i)
 
 		status := logger.NewStatus()
 		status.Start(fmt.Sprintf("deleting Kind cluster %s", clusterName))
@@ -346,15 +379,8 @@ func (m *Manager) printClusterStatusTable(opts *StatusOptions) error {
 	var statuses []clusterStatus
 
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "kind1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("kind%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
+		clusterName = resolveExistingClusterName(existingClusters, clusterName, i)
 
 		// check if cluster exists
 		if !clusterMap[clusterName] {
@@ -459,19 +485,14 @@ func (m *Manager) LoadImage(opts *LoadImageOptions) error {
 	}
 
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "kind1"
-		} else {
-			clusterName = fmt.Sprintf("kind%d", i)
-		}
+		clusterName, _ := clusterAndContextName(opts.Project, opts.NumClusters, i)
 
 		// verify cluster exists using SDK
 		existingClusters, err := m.ListClusterNames()
 		if err != nil {
 			return fmt.Errorf("failed to list kind clusters: %w", err)
 		}
+		clusterName = resolveExistingClusterName(existingClusters, clusterName, i)
 
 		clusterExists := false
 		for _, existingCluster := range existingClusters {
@@ -675,26 +696,29 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 			clusters = []string{}
 		}
 	}
+	// resolve against the legacy pre-project-scoping name too, so a project
+	// created by an older lok8s version is still recognized as existing
+	existingName := resolveExistingClusterName(clusters, clusterName, clusterIndex)
 	if len(clusters) > 0 {
 		for _, existingCluster := range clusters {
-			if existingCluster == clusterName {
+			if existingCluster == existingName {
 				if opts.Recreate {
 					// prompt user for confirmation
-					if !confirmRecreation(clusterName) {
+					if !confirmRecreation(existingName) {
 						return fmt.Errorf("cluster creation cancelled")
 					}
 
-					logger.Infof("deleting existing cluster %s", clusterName)
-					if err := m.provider.Delete(clusterName, ""); err != nil {
-						logger.Warnf("failed to delete existing cluster %s: %v", clusterName, err)
+					logger.Infof("deleting existing cluster %s", existingName)
+					if err := m.provider.Delete(existingName, ""); err != nil {
+						logger.Warnf("failed to delete existing cluster %s: %v", existingName, err)
 						// continue anyway, the create might still work
 					} else {
-						logger.Infof("successfully deleted existing cluster %s", clusterName)
+						logger.Infof("successfully deleted existing cluster %s", existingName)
 					}
 				} else {
-					logger.Warnf("⚠️ cluster %s already exists", clusterName)
+					logger.Warnf("⚠️ cluster %s already exists", existingName)
 					logger.Warnf("⚠️ use --recreate flag to delete and recreate existing clusters (DESTRUCTIVE !!!)")
-					return fmt.Errorf("cluster %s already exists, use --recreate to overwrite", clusterName)
+					return fmt.Errorf("cluster %s already exists, use --recreate to overwrite", existingName)
 				}
 				break
 			}
@@ -721,7 +745,7 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 	status2.End(true)
 
 	// Update cluster context with correct server URL
-	if err := m.updateClusterContext(clusterIndex, cpPort); err != nil {
+	if err := m.updateClusterContext(clusterName, cpPort); err != nil {
 		logger.Warnf("failed to update cluster context: %v", err)
 	}
 
@@ -739,19 +763,20 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 }
 
 // updateClusterContext updates the cluster context with the correct server URL
-func (m *Manager) updateClusterContext(clusterIndex int, port string) error {
-	// Format cluster number
-	number := clusterIndex
-	clusterName := fmt.Sprintf("kind-kind%d", number)
+func (m *Manager) updateClusterContext(clusterName, port string) error {
+	// kind's own cluster object in kubeconfig keeps its auto-generated
+	// "kind-<clusterName>" name - only the context itself gets renamed (see
+	// createCluster's RenameContext call above)
+	kindClusterName := fmt.Sprintf("kind-%s", clusterName)
 
 	// Set the cluster server URL using Kubernetes SDK
 	serverURL := fmt.Sprintf("https://%s:%s", "127.0.0.1", port)
-	err := k8s.UpdateClusterServer(clusterName, serverURL, false)
+	err := k8s.UpdateClusterServer(kindClusterName, serverURL, false)
 	if err != nil {
 		return fmt.Errorf("failed to set cluster server URL: %w", err)
 	}
 
-	logger.Debugf("updated cluster context %s with server URL: %s", clusterName, serverURL)
+	logger.Debugf("updated cluster context %s with server URL: %s", kindClusterName, serverURL)
 	return nil
 }
 
