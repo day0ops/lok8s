@@ -114,9 +114,9 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 
 	// one network per project (not per cluster), so every cluster and node
 	// within a project shares one routable, isolated segment
-	networkName := config.NativeNetworkNamePrefix + opts.Project
-	if err := m.client.CreateNetwork(networkName, opts.SubnetCIDR); err != nil {
-		return fmt.Errorf("failed to create network: %w", err)
+	networkName, err := m.ensureNetwork(opts)
+	if err != nil {
+		return fmt.Errorf("failed to set up network: %w", err)
 	}
 
 	for i := 1; i <= opts.NumClusters; i++ {
@@ -285,9 +285,41 @@ func (m *Manager) checkPrerequisites() error {
 	return nil
 }
 
-// createCluster creates a single native cluster's control-plane node, waits
-// for it to become ready, and merges its kubeconfig into the shared
-// kubeconfig. It returns the control-plane's routable VM IP.
+// ensureNetwork creates the project's shared network if it doesn't already
+// exist, picking a free subnet if the requested one is already in use by
+// another project's network. opts.SubnetCIDR is updated to whichever subnet
+// actually ends up in use, so the caller can persist it.
+func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
+	networkName := config.NativeNetworkNamePrefix + opts.Project
+
+	exists, err := m.client.NetworkExists(networkName)
+	if err != nil {
+		return "", fmt.Errorf("failed to check for existing network %s: %w", networkName, err)
+	}
+	if exists {
+		return networkName, nil
+	}
+
+	freeSubnet, err := FindFreeSubnet(m.client, opts.SubnetCIDR, 1, 50)
+	if err != nil {
+		return "", fmt.Errorf("failed to find a free subnet: %w", err)
+	}
+	if freeSubnet != opts.SubnetCIDR {
+		logger.Debugf("using generated subnet %s (requested subnet %s is already in use)", freeSubnet, opts.SubnetCIDR)
+		opts.SubnetCIDR = freeSubnet
+	}
+
+	if err := m.client.CreateNetwork(networkName, freeSubnet); err != nil {
+		return "", fmt.Errorf("failed to create network %s: %w", networkName, err)
+	}
+
+	return networkName, nil
+}
+
+// createCluster creates a single native cluster's control-plane node and
+// workers, waits for them to become ready, and merges the control-plane's
+// kubeconfig into the shared kubeconfig. It returns the control-plane's
+// routable VM IP.
 func (m *Manager) createCluster(clusterName, contextName, image, networkName string, opts *CreateOptions) (string, error) {
 	cpNodeName := clusterName + "-control-plane"
 
@@ -346,6 +378,29 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 	}
 	status2.End(true)
 
+	// worker join is gated by the in-VM readiness check above, not by host
+	// reachability - workers join the control-plane over the shared project
+	// network directly, without going through the host at all
+	serverURL := fmt.Sprintf("https://%s:%d", cpIP, k3sAPIPort)
+	for j := 1; j <= opts.NodeCount; j++ {
+		workerName := fmt.Sprintf("%s-worker-%d", clusterName, j)
+
+		statusW := logger.NewStatus()
+		statusW.Start(fmt.Sprintf("booting worker node %s", workerName))
+		if err := m.client.Run(RunOptions{
+			Name:    workerName,
+			Network: networkName,
+			CPUs:    config.NativeCPU,
+			Memory:  config.NativeMemory,
+			Image:   image,
+			Args:    workerArgs(serverURL, token, workerName),
+		}); err != nil {
+			statusW.End(false)
+			return "", fmt.Errorf("failed to boot worker node %s: %w", workerName, err)
+		}
+		statusW.End(true)
+	}
+
 	if err := waitForHostReachable(cpIP, k3sAPIPort, 2*time.Minute); err != nil {
 		return "", fmt.Errorf("control-plane not reachable from host: %w", err)
 	}
@@ -358,7 +413,36 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 	}
 	status3.End(true)
 
+	// wait for every node to register before returning, so Cilium's own
+	// readiness wait (which just polls DaemonSet desired == ready) doesn't
+	// converge early against a control-plane-only node set while workers are
+	// still joining
+	if err := m.waitForNodeCount(contextName, opts.NodeCount+1, 3*time.Minute); err != nil {
+		return "", err
+	}
+
 	return cpIP, nil
+}
+
+// waitForNodeCount waits until at least expected nodes have registered with
+// the cluster's API server (registration only, not the Ready condition -
+// nodes stay NotReady until Cilium is installed)
+func (m *Manager) waitForNodeCount(contextName string, expected int, timeout time.Duration) error {
+	clientManager, err := k8s.NewClientManagerForContext(contextName)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client manager: %w", err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		nodes, err := clientManager.GetClientset().CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+		if err == nil && len(nodes.Items) >= expected {
+			return nil
+		}
+		time.Sleep(3 * time.Second)
+	}
+
+	return fmt.Errorf("timed out waiting for %d nodes to register in cluster %s", expected, contextName)
 }
 
 // mergeClusterKubeconfig extracts the control-plane's kubeconfig and merges

@@ -67,6 +67,16 @@ func controlPlaneArgs(token, nodeName, tlsSAN string) []string {
 	}
 }
 
+// workerArgs builds the `k3s agent` arguments for a worker node
+func workerArgs(serverURL, token, nodeName string) []string {
+	return []string{
+		"agent",
+		"--server", serverURL,
+		"--token", token,
+		"--node-name", nodeName,
+	}
+}
+
 // waitForInVMReady polls the control-plane node from inside its own VM until
 // k3s reports readiness. This works before host-to-VM routing is confirmed
 // and gates worker join. k3s images don't ship curl, so this uses the
