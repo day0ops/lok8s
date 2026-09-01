@@ -46,7 +46,7 @@ import (
 // each cluster's own Cilium/kube-proxy and never routed onto the shared
 // network, so two clusters reusing the same private range don't conflict
 // any more than two unrelated home routers both using 192.168.1.0/24 would.
-func FindFreeSubnet(client *ContainerClient, startSubnet string, step, tries int) (string, error) {
+func FindFreeSubnet(client NodeClient, startSubnet string, step, tries int) (string, error) {
 	existing, err := client.ListNetworkSubnets()
 	if err != nil {
 		return "", fmt.Errorf("failed to list existing container networks: %w", err)

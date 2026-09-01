@@ -93,7 +93,7 @@ func workerArgs(serverURL, token, nodeName string) []string {
 // container ("path \"/sys/fs/bpf\" is mounted on \"/sys\" but it is not a
 // shared mount"). This must run before any pod that needs a shared bpf
 // mount - i.e. before Cilium - gets scheduled onto the node.
-func makeRootMountShared(client *ContainerClient, nodeName string) error {
+func makeRootMountShared(client NodeClient, nodeName string) error {
 	if _, err := client.Exec(nodeName, "mount", "--make-rshared", "/"); err != nil {
 		return fmt.Errorf("failed to mark root mount shared on %s: %w", nodeName, err)
 	}
@@ -106,7 +106,7 @@ func makeRootMountShared(client *ContainerClient, nodeName string) error {
 // embedded kubectl. Note: it must be invoked as the "kubectl" multicall
 // binary directly (`kubectl get ...`), not via "k3s kubectl get ..." - the
 // latter fails with "unknown command" on the images tested against.
-func waitForInVMReady(client *ContainerClient, nodeName string, timeout time.Duration) error {
+func waitForInVMReady(client NodeClient, nodeName string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		output, err := client.Exec(nodeName, "kubectl", "get", "--raw=/readyz")
@@ -136,20 +136,6 @@ func waitForHostReachable(ip string, port int, timeout time.Duration) error {
 	}
 
 	return fmt.Errorf("timed out after %s waiting for %s to become reachable from host", timeout, addr)
-}
-
-// k3sImage resolves a lok8s Kubernetes version (e.g. "1.33" or "stable") to
-// the corresponding rancher/k3s image reference
-func k3sImage(k8sVersion string) (string, error) {
-	version, err := resolveK3sVersion(k8sVersion)
-	if err != nil {
-		return "", err
-	}
-
-	// k3s docker tags use a hyphen where the k3s version itself uses a "+"
-	// (e.g. "1.33.13+k3s2" -> "v1.33.13-k3s2")
-	tag := "v" + strings.ReplaceAll(version, "+", "-")
-	return fmt.Sprintf("rancher/k3s:%s", tag), nil
 }
 
 // resolveK3sVersion resolves a Kubernetes minor version (or "stable") to a

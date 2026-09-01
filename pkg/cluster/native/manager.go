@@ -27,7 +27,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -40,12 +39,12 @@ import (
 	"github.com/day0ops/lok8s/pkg/services"
 	"github.com/day0ops/lok8s/pkg/util/helm"
 	"github.com/day0ops/lok8s/pkg/util/k8s"
-	"github.com/day0ops/lok8s/pkg/util/version"
 )
 
-// Manager manages native (Apple Virtualization / `container` CLI) clusters
+// Manager manages native clusters: VM-per-node Kubernetes via Apple's
+// `container` CLI on macOS, or Incus on Linux (see client.go's NodeClient).
 type Manager struct {
-	client         *ContainerClient
+	client         NodeClient
 	helmManager    *helm.HelmManager
 	ciliumManager  *services.CiliumManager
 	metallbManager *services.MetalLBManager
@@ -142,7 +141,7 @@ func NewManager() *Manager {
 	helmManager := helm.NewHelmManager(k8sConfigPath)
 
 	return &Manager{
-		client:        NewContainerClient(),
+		client:        NewNodeClient(),
 		helmManager:   helmManager,
 		ciliumManager: services.NewCiliumManager(helmManager, nil), // native doesn't need a binary manager
 		// native nodes are directly IP-addressable on the project's routable
@@ -164,11 +163,6 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 		return fmt.Errorf("the native provider only supports the cilium CNI, got: %s", opts.CNI)
 	}
 
-	image, err := k3sImage(opts.K8sVersion)
-	if err != nil {
-		return fmt.Errorf("failed to resolve Kubernetes version: %w", err)
-	}
-
 	// one network per project (not per cluster), so every cluster and node
 	// within a project shares one routable, isolated segment
 	networkName, err := m.ensureNetwork(opts)
@@ -179,7 +173,7 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	for i := 1; i <= opts.NumClusters; i++ {
 		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
 
-		cpIP, err := m.createCluster(clusterName, contextName, image, networkName, opts)
+		cpIP, err := m.createCluster(clusterName, contextName, networkName, opts)
 		if err != nil {
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
 		}
@@ -337,32 +331,12 @@ func (m *Manager) ListClusterNames() ([]string, error) {
 	return clusters, nil
 }
 
-// checkPrerequisites checks if the native provider's requirements are met
+// checkPrerequisites checks if the native provider's requirements are met on
+// this platform. The actual checks are platform-specific (see
+// ContainerClient.CheckPrerequisites on macOS, IncusClient.CheckPrerequisites
+// on Linux).
 func (m *Manager) checkPrerequisites() error {
-	// this is Apple's own hard requirement for the `container` CLI, not a
-	// choice lok8s is making
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return fmt.Errorf("the native provider requires macOS on Apple Silicon (darwin/arm64), detected %s/%s", runtime.GOOS, runtime.GOARCH)
-	}
-
-	installedVersion, err := m.client.Version()
-	if err != nil {
-		return fmt.Errorf("container CLI not found or not working: %w (install it from github.com/apple/container)", err)
-	}
-
-	if installedVersion == "1.2.0" {
-		return fmt.Errorf("container CLI version 1.2.0 has known issues, please upgrade to %s or later", config.NativeContainerMinSupportedVersion)
-	}
-	if version.Compare(config.NativeContainerMinSupportedVersion, installedVersion) > 0 {
-		return fmt.Errorf("container CLI version %s is too old. Minimum supported version is %s", installedVersion, config.NativeContainerMinSupportedVersion)
-	}
-	logger.Debugf("using container CLI version: %s", installedVersion)
-
-	if !m.client.SystemRunning() {
-		return fmt.Errorf("container system services are not running, start them with: container system start")
-	}
-
-	return nil
+	return m.client.CheckPrerequisites()
 }
 
 // ensureNetwork creates the project's shared network if it doesn't already
@@ -406,7 +380,7 @@ func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
 // (or an early worker) comes up would otherwise leave it running indefinitely,
 // consuming CPU/memory/disk, and would make the next `create` attempt fail
 // with a confusing "already exists" rather than a clean retry.
-func (m *Manager) createCluster(clusterName, contextName, image, networkName string, opts *CreateOptions) (cpIP string, err error) {
+func (m *Manager) createCluster(clusterName, contextName, networkName string, opts *CreateOptions) (cpIP string, err error) {
 	cpNodeName := clusterName + "-control-plane"
 
 	existingNodes, err := m.nodeNamesForCluster(clusterName)
@@ -444,26 +418,14 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 
 	status := logger.NewStatus()
 	status.Start(fmt.Sprintf("booting control-plane node %s", cpNodeName))
-	if err := m.client.Run(RunOptions{
-		Name:    cpNodeName,
-		Network: networkName,
-		CPUs:    config.NativeCPU,
-		Memory:  config.NativeMemory,
-		Image:   image,
-		// the node's own container name is used as its --tls-san: the
-		// routable VM IP isn't known until after boot, so it can't be baked
-		// into the cert as a SAN up front (see createCluster's server URL
-		// rewrite below)
-		Args: controlPlaneArgs(token, cpNodeName, cpNodeName),
-	}); err != nil {
+	// the node's own name is used as its --tls-san: the routable VM IP isn't
+	// known until after boot, so it can't be baked into the cert as a SAN
+	// up front (see createCluster's server URL rewrite below)
+	if err := m.client.BootControlPlane(cpNodeName, networkName, config.NativeCPU, config.NativeMemory, opts.K8sVersion, token, cpNodeName); err != nil {
 		status.End(false)
 		return "", fmt.Errorf("failed to boot control-plane node: %w", err)
 	}
 	createdNodes = append(createdNodes, cpNodeName)
-	if err := makeRootMountShared(m.client, cpNodeName); err != nil {
-		status.End(false)
-		return "", err
-	}
 	status.End(true)
 
 	cpIP, err = m.waitForNodeIP(cpNodeName, networkName, 2*time.Minute)
@@ -488,22 +450,11 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 
 		statusW := logger.NewStatus()
 		statusW.Start(fmt.Sprintf("booting worker node %s", workerName))
-		if err := m.client.Run(RunOptions{
-			Name:    workerName,
-			Network: networkName,
-			CPUs:    config.NativeCPU,
-			Memory:  config.NativeMemory,
-			Image:   image,
-			Args:    workerArgs(serverURL, token, workerName),
-		}); err != nil {
+		if err := m.client.BootWorker(workerName, networkName, config.NativeCPU, config.NativeMemory, opts.K8sVersion, serverURL, token); err != nil {
 			statusW.End(false)
 			return "", fmt.Errorf("failed to boot worker node %s: %w", workerName, err)
 		}
 		createdNodes = append(createdNodes, workerName)
-		if err := makeRootMountShared(m.client, workerName); err != nil {
-			statusW.End(false)
-			return "", err
-		}
 		statusW.End(true)
 	}
 
