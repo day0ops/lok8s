@@ -400,7 +400,13 @@ func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
 // workers, waits for them to become ready, and merges the control-plane's
 // kubeconfig into the shared kubeconfig. It returns the control-plane's
 // routable VM IP.
-func (m *Manager) createCluster(clusterName, contextName, image, networkName string, opts *CreateOptions) (string, error) {
+//
+// If any step fails partway through, every node booted during this call is
+// deleted before returning: without this, a failure after the control-plane
+// (or an early worker) comes up would otherwise leave it running indefinitely,
+// consuming CPU/memory/disk, and would make the next `create` attempt fail
+// with a confusing "already exists" rather than a clean retry.
+func (m *Manager) createCluster(clusterName, contextName, image, networkName string, opts *CreateOptions) (cpIP string, err error) {
 	cpNodeName := clusterName + "-control-plane"
 
 	existingNodes, err := m.nodeNamesForCluster(clusterName)
@@ -420,6 +426,16 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 			return "", fmt.Errorf("failed to delete existing cluster %s: %w", clusterName, err)
 		}
 	}
+
+	var createdNodes []string
+	defer func() {
+		if err != nil && len(createdNodes) > 0 {
+			logger.Warnf("cluster %s failed to come up, cleaning up %d node(s): %v", clusterName, len(createdNodes), createdNodes)
+			if delErr := m.client.Delete(createdNodes...); delErr != nil {
+				logger.Warnf("failed to clean up nodes for cluster %s, they may need manual removal: %v", clusterName, delErr)
+			}
+		}
+	}()
 
 	token, err := generateClusterToken()
 	if err != nil {
@@ -443,13 +459,14 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 		status.End(false)
 		return "", fmt.Errorf("failed to boot control-plane node: %w", err)
 	}
+	createdNodes = append(createdNodes, cpNodeName)
 	if err := makeRootMountShared(m.client, cpNodeName); err != nil {
 		status.End(false)
 		return "", err
 	}
 	status.End(true)
 
-	cpIP, err := m.waitForNodeIP(cpNodeName, networkName, 2*time.Minute)
+	cpIP, err = m.waitForNodeIP(cpNodeName, networkName, 2*time.Minute)
 	if err != nil {
 		return "", fmt.Errorf("failed to determine control-plane IP: %w", err)
 	}
@@ -482,6 +499,7 @@ func (m *Manager) createCluster(clusterName, contextName, image, networkName str
 			statusW.End(false)
 			return "", fmt.Errorf("failed to boot worker node %s: %w", workerName, err)
 		}
+		createdNodes = append(createdNodes, workerName)
 		if err := makeRootMountShared(m.client, workerName); err != nil {
 			statusW.End(false)
 			return "", err
