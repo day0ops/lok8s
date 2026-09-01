@@ -21,7 +21,7 @@ Features:
 - **Multiple Cluster Providers**: 
   - Kind clusters with Docker/Podman support
   - Minikube clusters with KVM2 (Linux) and VFKit (macOS) drivers
-  - Native clusters backed by Apple's `container` CLI and Virtualization.framework (macOS on Apple Silicon only), giving each node its own real Linux VM instead of a shared-kernel container
+  - Native clusters, giving each node its own real Linux VM instead of a shared-kernel container: Apple's `container` CLI and Virtualization.framework on macOS (Apple Silicon only), Incus on Linux
 - **Advanced Networking**: 
   - Integrated libvirt network management (Linux)
   - Automatic network isolation between clusters
@@ -52,8 +52,14 @@ For now this tool is limited to macOS and Linux platforms.
 - vmnet-helper (for advanced networking)
 
 #### Native Provider Requirements (`--environment native`)
+
+On macOS:
 - macOS 26 or later on Apple Silicon (Intel Macs and older macOS versions aren't supported - this is Apple's own requirement for the `container` CLI, not a choice made by lok8s)
 - [`container`](https://github.com/apple/container) CLI version 1.2.1 or later, with its system services running (`container system start`)
+
+On Linux:
+- [Incus](https://linuxcontainers.org/incus/) 6.0 or later, initialized (`incus admin init`)
+- **This backend is best-effort and has not been verified against a real Incus install** - it was written against Incus's documented CLI/API behavior with no Linux host available during development. Expect to find and fix real issues before relying on it (see `pkg/cluster/native/incus_client.go`'s header comment for the specific things most likely to need adjustment).
 
 ### Download the binary
 
@@ -97,7 +103,7 @@ lok8s create -p myproject -n 3 \
 # Create without MetalLB
 lok8s create -p myproject -n 1 --environment kind --skip-metallb-install
 
-# Create a single-control-plane native cluster (macOS on Apple Silicon only)
+# Create a single-control-plane native cluster (macOS on Apple Silicon, or Linux via Incus)
 lok8s create -p myproject -n 1 --environment native --nodes 0
 
 # Create a native cluster with 2 worker nodes
@@ -212,7 +218,9 @@ pkg/
 │   │   └── binary_manager.go
 │   └── native/
 │       ├── manager.go
-│       ├── container_client.go
+│       ├── client.go             # NodeClient interface shared by both backends
+│       ├── container_client.go   # macOS backend (Apple `container` CLI)
+│       ├── incus_client.go       # Linux backend (Incus)
 │       ├── k3s.go
 │       ├── subnet.go
 │       └── kubeconfig_merge.go

@@ -54,7 +54,8 @@ var rootCmd = &cobra.Command{
 	Short: "A tool for provisioning local Kubernetes clusters (multi) with network management",
 	Long: strings.Replace(`[config.AppName] is a comprehensive tool that combines cluster provisioning
 with advanced network management capabilities. It supports Kind and Minikube clusters
-on Linux and macOS platforms, and a native provider (macOS on Apple Silicon only).
+on Linux and macOS platforms, and a native VM-per-node provider (Apple's container CLI
+on macOS Apple Silicon, Incus on Linux).
 
 Default behavior: If no --environment flag is specified, [config.AppName] will default to minikube.
 Use '[config.AppName] --environment kind' or '[config.AppName] --environment native' to use kind
