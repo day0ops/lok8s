@@ -53,12 +53,15 @@ type NodeClient interface {
 	// BootControlPlane boots a node running the given Kubernetes version and
 	// starts a k3s server on it, blocking until the node itself (not k3s) is
 	// confirmed running. tlsSAN is added to the k3s server certificate's SAN
-	// list.
-	BootControlPlane(nodeName, network, cpus, memory, k8sVersion, token, tlsSAN string) error
+	// list. Node resource sizing (CPU/memory) is each implementation's own
+	// concern, not a caller parameter: the two platforms don't even agree on
+	// a unit syntax (Apple's container CLI wants "2G", Incus wants "2GiB"),
+	// and neither is user-configurable today.
+	BootControlPlane(nodeName, network, k8sVersion, token, tlsSAN string) error
 	// BootWorker boots a node running the given Kubernetes version and starts
 	// a k3s agent joining serverURL, blocking until the node itself is
 	// confirmed running.
-	BootWorker(nodeName, network, cpus, memory, k8sVersion, serverURL, token string) error
+	BootWorker(nodeName, network, k8sVersion, serverURL, token string) error
 
 	// Exec runs a command inside a running node and returns its stdout.
 	Exec(nodeName string, args ...string) (string, error)

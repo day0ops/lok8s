@@ -421,7 +421,7 @@ func (m *Manager) createCluster(clusterName, contextName, networkName string, op
 	// the node's own name is used as its --tls-san: the routable VM IP isn't
 	// known until after boot, so it can't be baked into the cert as a SAN
 	// up front (see createCluster's server URL rewrite below)
-	if err := m.client.BootControlPlane(cpNodeName, networkName, config.NativeCPU, config.NativeMemory, opts.K8sVersion, token, cpNodeName); err != nil {
+	if err := m.client.BootControlPlane(cpNodeName, networkName, opts.K8sVersion, token, cpNodeName); err != nil {
 		status.End(false)
 		return "", fmt.Errorf("failed to boot control-plane node: %w", err)
 	}
@@ -450,7 +450,7 @@ func (m *Manager) createCluster(clusterName, contextName, networkName string, op
 
 		statusW := logger.NewStatus()
 		statusW.Start(fmt.Sprintf("booting worker node %s", workerName))
-		if err := m.client.BootWorker(workerName, networkName, config.NativeCPU, config.NativeMemory, opts.K8sVersion, serverURL, token); err != nil {
+		if err := m.client.BootWorker(workerName, networkName, opts.K8sVersion, serverURL, token); err != nil {
 			statusW.End(false)
 			return "", fmt.Errorf("failed to boot worker node %s: %w", workerName, err)
 		}

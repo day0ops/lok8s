@@ -323,13 +323,13 @@ func k3sImage(k8sVersion string) (string, error) {
 // BootControlPlane boots a node VM running a k3s server. The rancher/k3s OCI
 // image's entrypoint is the k3s binary itself, so a single `container run`
 // both boots the node and starts k3s on it.
-func (c *ContainerClient) BootControlPlane(nodeName, network, cpus, memory, k8sVersion, token, tlsSAN string) error {
+func (c *ContainerClient) BootControlPlane(nodeName, network, k8sVersion, token, tlsSAN string) error {
 	image, err := k3sImage(k8sVersion)
 	if err != nil {
 		return fmt.Errorf("failed to resolve Kubernetes version: %w", err)
 	}
 
-	if err := c.run(nodeName, network, cpus, memory, image, controlPlaneArgs(token, nodeName, tlsSAN)); err != nil {
+	if err := c.run(nodeName, network, config.NativeCPU, config.NativeMemory, image, controlPlaneArgs(token, nodeName, tlsSAN)); err != nil {
 		return err
 	}
 
@@ -337,13 +337,13 @@ func (c *ContainerClient) BootControlPlane(nodeName, network, cpus, memory, k8sV
 }
 
 // BootWorker boots a node VM running a k3s agent joining serverURL.
-func (c *ContainerClient) BootWorker(nodeName, network, cpus, memory, k8sVersion, serverURL, token string) error {
+func (c *ContainerClient) BootWorker(nodeName, network, k8sVersion, serverURL, token string) error {
 	image, err := k3sImage(k8sVersion)
 	if err != nil {
 		return fmt.Errorf("failed to resolve Kubernetes version: %w", err)
 	}
 
-	if err := c.run(nodeName, network, cpus, memory, image, workerArgs(serverURL, token, nodeName)); err != nil {
+	if err := c.run(nodeName, network, config.NativeCPU, config.NativeMemory, image, workerArgs(serverURL, token, nodeName)); err != nil {
 		return err
 	}
 
