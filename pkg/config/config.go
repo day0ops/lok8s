@@ -92,6 +92,8 @@ var (
 	// Kubernetes version mappings
 	// refer to https://github.com/kubernetes-sigs/kind/releases for the latest builds
 	KindK8sVersions = map[string]string{
+		"1.36": "v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+		"1.35": "v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0",
 		"1.34": "v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
 		"1.33": "v1.33.4@sha256:25a6018e48dfcaee478f4a59af81157a437f15e6e140bf103f85a2e7cd0cbbf2",
 		"1.32": "v1.32.8@sha256:abd489f042d2b644e2d033f5c2d900bc707798d075e8186cb65e3f1367a9d5a1",
@@ -102,6 +104,7 @@ var (
 
 	// https://github.com/kubernetes/minikube/blob/master/pkg/minikube/constants/constants.go
 	MinikubeK8sVersions = map[string]string{
+		"1.35": "1.35.1",
 		"1.34": "1.34.0",
 		"1.33": "1.33.1",
 		"1.32": "1.32.6",

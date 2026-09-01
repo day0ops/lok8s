@@ -38,7 +38,7 @@ For now this tool is limited to macOS and Linux platforms.
 ### Prerequisites
 
 #### Common Requirements
-- Go 1.24 or later
+- Go 1.27 or later
 - Docker or Podman
 
 #### Linux-Specific Requirements
@@ -224,6 +224,8 @@ pkg/
 ## Supported Kubernetes Versions
 
 ### Kind
+- 1.36.x
+- 1.35.x
 - 1.34.x
 - 1.33.x
 - 1.32.x  
@@ -232,6 +234,7 @@ pkg/
 - 1.29.x
 
 ### Minikube
+- 1.35.x
 - 1.34.x
 - 1.33.x
 - 1.32.x
