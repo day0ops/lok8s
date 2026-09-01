@@ -162,6 +162,16 @@ func (mm *MetalLBManager) SaveAllocation(project string, allocation *config.Meta
 
 // InstallMetalLB installs MetalLB using Helm
 func (mm *MetalLBManager) InstallMetalLB(clusterName string) error {
+	return mm.InstallMetalLBWithValues(clusterName, nil)
+}
+
+// InstallMetalLBWithValues installs MetalLB using Helm, merging extraValues
+// (top-level keys only) over the defaults (extraValues may be nil). This lets
+// callers with topologies that need a non-default install - e.g. the native
+// provider, which pins the controller to the control-plane node to avoid a
+// cross-node admission webhook call that hangs in that environment - adjust
+// the install without duplicating the repository-add/install/wait sequence.
+func (mm *MetalLBManager) InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}) error {
 	status := logger.NewStatus()
 	status.Start(fmt.Sprintf("installing MetalLB on cluster %s", clusterName))
 	defer func() {
@@ -210,6 +220,9 @@ func (mm *MetalLBManager) InstallMetalLB(clusterName string) error {
 				},
 			},
 		},
+	}
+	for k, v := range extraValues {
+		values[k] = v
 	}
 
 	if err := mm.helmManager.InstallChart("metallb", "metallb/metallb", "metallb-system", values, 5*time.Minute); err != nil {
