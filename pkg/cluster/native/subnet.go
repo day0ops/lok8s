@@ -33,6 +33,19 @@ import (
 // checked directly against `container network list`'s live output rather
 // than a separately persisted allocation file, since container networks are
 // already queryable as the source of truth.
+//
+// This only checks other project networks, not Cilium's own pod-CIDR pool
+// (10.0.0.0/8 by default), which numerically contains the project subnets
+// we draw from too. That's a latent overlap, not an active one: Cilium
+// hands out per-node /24s
+// sequentially from the bottom of its pool, so a project subnet like
+// 10.89.0.0/16 would only collide with real pod IPs after tens of thousands
+// of nodes in one cluster - far beyond anything lok8s creates. Pod and
+// service CIDRs are also reused as-is across every cluster in a project (see
+// CreateClusters), which is fine for the same reason: they're internal to
+// each cluster's own Cilium/kube-proxy and never routed onto the shared
+// network, so two clusters reusing the same private range don't conflict
+// any more than two unrelated home routers both using 192.168.1.0/24 would.
 func FindFreeSubnet(client *ContainerClient, startSubnet string, step, tries int) (string, error) {
 	existing, err := client.ListNetworkSubnets()
 	if err != nil {
