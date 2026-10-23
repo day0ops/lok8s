@@ -358,9 +358,8 @@ func (hm *HelmManager) getActionConfig(namespace string) (*action.Configuration,
 	actionConfig := new(action.Configuration)
 
 	// Initialize with settings
-	if err := actionConfig.Init(hm.settings.RESTClientGetter(), namespace, "secret", func(format string, v ...interface{}) {
-		logger.Debugf(format, v...)
-	}); err != nil {
+	debugLog := func(format string, v ...interface{}) { logger.Debugf(format, v...) }
+	if err := actionConfig.Init(hm.settings.RESTClientGetter(), namespace, "secret", debugLog); err != nil {
 		return nil, fmt.Errorf("failed to initialize action config: %w", err)
 	}
 
@@ -435,9 +434,8 @@ func (hm *HelmManager) TemplateChart(releaseName, chartName, namespace string, v
 	// use a dummy namespace since we're not actually connecting to a cluster
 	actionConfig := new(action.Configuration)
 	dummyNamespace := "default"
-	if err := actionConfig.Init(hm.settings.RESTClientGetter(), dummyNamespace, "memory", func(format string, v ...interface{}) {
-		logger.Debugf(format, v...)
-	}); err != nil {
+	debugLog := func(format string, v ...interface{}) { logger.Debugf(format, v...) }
+	if err := actionConfig.Init(hm.settings.RESTClientGetter(), dummyNamespace, "memory", debugLog); err != nil {
 		// if initialization fails (e.g., no kubeconfig), we can still proceed with templating
 		// by using engine directly
 		logger.Debugf("action config initialization failed (this is OK for templating): %v", err)
