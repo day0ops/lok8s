@@ -1,10 +1,15 @@
-# lok8s
+# ☸️ lok8s
+
+[![CI](https://github.com/day0ops/lok8s/actions/workflows/build-pr.yml/badge.svg)](https://github.com/day0ops/lok8s/actions/workflows/build-pr.yml)
+[![Coverage](https://codecov.io/gh/day0ops/lok8s/branch/main/graph/badge.svg)](https://codecov.io/gh/day0ops/lok8s)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/day0ops/lok8s)](go.mod)
+[![License](https://img.shields.io/github/license/day0ops/lok8s)](LICENSE)
 
 lok8s (short for "Local Kubernetes") is a tool for provisioning local Kubernetes clusters with advanced network management capabilities.
 
 ![demo](images/demo.png)
 
-## Why does this tool exist ?
+## Why does this tool exist?
 
 One of the painful gaps in managing local Kubernetes clusters is in the area of multi-cluster setups. Developers working on microservices architectures, multi-tenant applications, or testing distributed systems often need multiple isolated Kubernetes clusters that can communicate with each other. However, most local Kubernetes tools (Kind, Minikube, etc.) create clusters in isolated network environments, making it difficult or impossible to:
 
@@ -16,13 +21,16 @@ Often these clusters are hosted in private segregated networks without the abili
 
 lok8s addresses this gap by providing automatic network management that creates isolated but routable network segments for each cluster, enabling true multi-cluster development and testing scenarios on local machines.
 
-Features:
+> [!IMPORTANT]
+> Nodes, and any NodePort or LoadBalancer service, in one cluster are reachable from another cluster in the same project (and from the host) out of the box. A pod cannot reach another cluster's pod directly by its pod IP - that requires a mesh overlay like Cilium ClusterMesh, which lok8s does not set up. Route cross-cluster traffic through a NodePort or LoadBalancer service instead of a raw pod IP.
 
-- **Multiple Cluster Providers**: 
+## Features
+
+- **Multiple Cluster Providers**:
   - Kind clusters with Docker/Podman support
   - Minikube clusters with KVM2 (Linux) and VFKit (macOS) drivers
   - Native clusters, giving each node its own real Linux VM instead of a shared-kernel container: Apple's `container` CLI and Virtualization.framework on macOS (Apple Silicon only), Incus on Linux
-- **Advanced Networking**: 
+- **Advanced Networking**:
   - Integrated libvirt network management (Linux)
   - Automatic network isolation between clusters
   - Custom subnet configuration
@@ -39,29 +47,41 @@ For now this tool is limited to macOS and Linux platforms.
 ### Prerequisites
 
 #### Common Requirements
+
 - Go 1.27 or later
 - Docker or Podman
 
 #### Linux-Specific Requirements
+
 - libvirt and libvirtd
 - qemu-kvm
 - User must be in the `libvirt` group
 
 #### macOS-Specific Requirements
+
 - VFKit (for Minikube multi-cluster setups)
 - vmnet-helper (for advanced networking)
+
+#### Kind Provider Requirements (`--environment kind`)
+
+> [!IMPORTANT]
+> If using **Podman**, it must be running **rootful** (`podman machine init --rootful`) when the CNI is Cilium (the default). Cilium's init containers need to mount the eBPF filesystem, which the Linux kernel refuses from inside any non-initial user namespace - the namespace every container gets under rootless Podman, regardless of capabilities. lok8s detects this combination and fails fast with an explanation rather than hanging; the alternatives are a rootful Podman machine, Docker, or `--cni kindnet`.
 
 #### Native Provider Requirements (`--environment native`)
 
 On macOS:
+
 - macOS 26 or later on Apple Silicon (Intel Macs and older macOS versions aren't supported - this is Apple's own requirement for the `container` CLI, not a choice made by lok8s)
 - [`container`](https://github.com/apple/container) CLI version 1.2.1 or later, with its system services running (`container system start`)
 
 On Linux:
-- [Incus](https://linuxcontainers.org/incus/) 6.0 or later, initialized (`incus admin init`)
-- **This backend is best-effort and has not been verified against a real Incus install** - it was written against Incus's documented CLI/API behavior with no Linux host available during development. Expect to find and fix real issues before relying on it (see `pkg/cluster/native/incus_client.go`'s header comment for the specific things most likely to need adjustment).
 
-### Download the binary
+- [Incus](https://linuxcontainers.org/incus/) 6.0 or later, initialized (`incus admin init`)
+
+> [!WARNING]
+> The Incus backend is best-effort and has not been verified against a real Incus install - it was written against Incus's documented CLI/API behavior with no Linux host available during development. Expect to find and fix real issues before relying on it (see `pkg/cluster/native/incus_client.go`'s header comment for the specific things most likely to need adjustment).
+
+### Download the Binary
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/day0ops/lok8s/refs/heads/main/install.sh | bash
@@ -81,6 +101,7 @@ make install
 ### Creating Clusters
 
 Create clusters (defaults to Minikube, use `--environment kind` for Kind):
+
 ```bash
 # Create a single Minikube cluster (default)
 lok8s create -p myproject -n 1
@@ -112,7 +133,6 @@ lok8s create -p myproject -n 1 --environment native --nodes 2
 
 ### Deleting Clusters
 
-Delete clusters:
 ```bash
 # Delete Minikube clusters (default)
 lok8s delete -p myproject -n 2
@@ -127,7 +147,8 @@ lok8s delete -p myproject -n 1 --environment native
 lok8s delete -p myproject -n 2 --force
 ```
 
-**Note:** Image loading (`lok8s image-load`) isn't yet supported for the native provider - `container image load` only seeds the local image store, not a running node's containerd.
+> [!NOTE]
+> Image loading (`lok8s image-load`) isn't yet supported for the native provider - `container image load` only seeds the local image store, not a running node's containerd.
 
 ### Managing Kind Tunnels
 
@@ -157,7 +178,8 @@ sudo lok8s kind-tunnel -p myproject --ports --format json
 lok8s kind-tunnel -p myproject --ports --format json
 ```
 
-**Note:** On macOS, sudo is required to access Docker privileged ports. On Linux, sudo is not required.
+> [!NOTE]
+> On macOS, sudo is required to access Docker privileged ports. On Linux, sudo is not required.
 
 ### Global Options
 
@@ -169,112 +191,20 @@ lok8s --verbose kind create -p myproject -n 1
 lok8s --config /path/to/config.yaml kind create -p myproject -n 1
 ```
 
-## Configuration
-
-The tool supports configuration via YAML file. By default, it looks for `~/.lok8s.yaml`:
-
-```yaml
-# Default configuration values
-kind:
-  network_name: "kind"
-  gateway_ip: "10.89.0.1"
-  subnet_cidr: "10.89.0.0/16"
-  node_count: 1
-
-minikube:
-  cpu: "4"
-  memory: "8GiB"
-  disk_size: "10GiB"
-  node_count: 2
-  bridge: "virbr50"
-  subnet_cidr: "10.89.0.1/16"
-
-metallb:
-  version: "0.14.9"
-  range_min_octet: "200"
-  range_max_octet: "254"
-
-network:
-  default_bridge: "virbr50"
-  qemu_uri: "qemu:///system"
-```
-
-## Code Structure
-
-The tool is structured as follows:
-
-```
-cmd/
-└── main.go
-
-pkg/
-├── cmd/
-│   ├── root.go
-│   └── kind_tunnel.go
-├── cluster/
-│   ├── kind/
-│   ├── minikube/
-│   │   ├── manager.go
-│   │   └── binary_manager.go
-│   └── native/
-│       ├── manager.go
-│       ├── client.go             # NodeClient interface shared by both backends
-│       ├── container_client.go   # macOS backend (Apple `container` CLI)
-│       ├── incus_client.go       # Linux backend (Incus)
-│       ├── k3s.go
-│       ├── subnet.go
-│       └── kubeconfig_merge.go
-├── config/
-│   ├── config.go
-│   └── project_config.go
-├── logger/
-│   ├── logger.go
-│   ├── formatter.go
-│   ├── spinner.go
-│   ├── status.go
-│   └── terminal.go
-├── network/
-│   ├── network.go
-│   ├── network_linux.go
-│   ├── network_darwin.go
-│   └── subnet.go
-├── services/
-│   ├── metallb.go
-│   ├── cilium.go
-│   └── cloud_provider_kind.go
-└── util/
-    ├── docker/
-    ├── github/
-    ├── helm/
-    ├── k8s/
-    ├── version/
-    └── retry.go
-```
+See [docs/configuration.md](docs/configuration.md) for the full YAML configuration reference.
 
 ## Supported Kubernetes Versions
 
-### Kind
-- 1.36.x
-- 1.35.x
-- 1.34.x
-- 1.33.x
-- 1.32.x  
-- 1.31.x
-- 1.30.x
-- 1.29.x
+| Provider | Supported Versions |
+|----------|---------------------|
+| Kind | 1.37.x, 1.36.x, 1.35.x, 1.34.x, 1.33.x, 1.32.x, 1.31.x, 1.30.x, 1.29.x |
+| Minikube | 1.37.x, 1.36.x, 1.35.x, 1.34.x, 1.33.x, 1.32.x, or any valid semantic version |
+| Native (k3s) | 1.37.x, 1.36.x, 1.35.x, 1.34.x, 1.33.x |
 
-### Minikube
-- 1.35.x
-- 1.34.x
-- 1.33.x
-- 1.32.x
-- Any valid semantic version (will be validated)
+## Documentation
 
-### Native (k3s)
-- 1.36.x
-- 1.35.x
-- 1.34.x
-- 1.33.x
+- [Configuration reference](docs/configuration.md)
+- [Code structure](docs/code-structure.md)
 
 ## Contributing
 
