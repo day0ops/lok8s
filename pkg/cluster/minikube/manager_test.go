@@ -106,4 +106,35 @@ var _ = Describe("Manager", func() {
 			Expect(minikubeTotalNodes(2)).To(Equal(3))
 		})
 	})
+
+	Describe("getMinikubeK8sVersion", func() {
+		var manager *Manager
+
+		BeforeEach(func() {
+			manager = &Manager{}
+		})
+
+		It("resolves stable to minikube's own newest tested version, not a stale minor", func() {
+			// matches NewestKubernetesVersion in minikube's own
+			// pkg/minikube/constants/constants.go as of minikube v1.39.0
+			version, err := manager.getMinikubeK8sVersion("stable")
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(version).To(Equal("v1.37.1"))
+		})
+
+		It("resolves the newest minor minikube actually tests against", func() {
+			version, err := manager.getMinikubeK8sVersion("1.37")
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(version).To(Equal("v1.37.1"))
+		})
+
+		It("resolves the minor below it too", func() {
+			version, err := manager.getMinikubeK8sVersion("1.36")
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(version).To(Equal("v1.36.5"))
+		})
+	})
 })

@@ -199,4 +199,28 @@ var _ = Describe("Manager", func() {
 			Expect(string(content)).NotTo(ContainSubstring("disableDefaultCNI"))
 		})
 	})
+
+	Describe("getKindestNodeImage", func() {
+		var manager *Manager
+
+		BeforeEach(func() {
+			manager = &Manager{}
+		})
+
+		It("resolves stable to kind's own current default node image, not a stale minor", func() {
+			// matches the default node image announced in the kind v0.33.0
+			// release notes (the version pinned in go.mod)
+			image, err := manager.getKindestNodeImage("stable")
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(image).To(ContainSubstring("kindest/node:v1.37.0@"))
+		})
+
+		It("resolves the newest minor kind v0.33.0 actually pre-builds", func() {
+			image, err := manager.getKindestNodeImage("1.37")
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(image).To(ContainSubstring("kindest/node:v1.37.0@"))
+		})
+	})
 })
