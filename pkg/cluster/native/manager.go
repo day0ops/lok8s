@@ -210,10 +210,27 @@ func (m *Manager) installCNIAndLoadBalancer(contextName, cpIP string, clusterInd
 	// k3s's own kube-proxy is left running (see controlPlaneArgs) since
 	// Cilium's replacement intercepts ahead of it once up, without leaving a
 	// gap before Cilium itself is ready.
+	//
+	// bpf.masquerade is required for cross-cluster pod traffic within the
+	// same project: by default Cilium masquerades pod egress via an iptables
+	// rule it inserts into POSTROUTING, but k3s's own kube-proxy (left
+	// running, see above) periodically resyncs the nat table from its own
+	// managed state and doesn't know about Cilium's custom chain, dropping
+	// the jump to it. The result: a pod's traffic to a sibling cluster's node
+	// (reachable, since every cluster in a project shares one routable
+	// network) leaves with its unmasqueraded pod IP as source, which the
+	// sibling node has no route back to, and the connection just hangs.
+	// eBPF-native masquerading bypasses iptables entirely, so it isn't
+	// affected by kube-proxy's resync. Confirmed by direct repro: cross-
+	// cluster pod->node traffic went from 100% packet loss to 0% after
+	// enabling this, with no other change.
 	ciliumValues := map[string]interface{}{
 		"kubeProxyReplacement": true,
 		"k8sServiceHost":       cpIP,
 		"k8sServicePort":       k3sAPIPort,
+		"bpf": map[string]interface{}{
+			"masquerade": true,
+		},
 	}
 	if err := m.ciliumManager.InstallCiliumWithValues(contextName, ciliumValues); err != nil {
 		return fmt.Errorf("failed to install Cilium on %s: %w", contextName, err)

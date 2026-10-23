@@ -34,12 +34,14 @@ import (
 
 // fakeCiliumInstaller is a test double for services.CiliumInstaller.
 type fakeCiliumInstaller struct {
-	installErr    error
-	installCalled bool
+	installErr     error
+	installCalled  bool
+	receivedValues map[string]interface{}
 }
 
 func (f *fakeCiliumInstaller) InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error {
 	f.installCalled = true
+	f.receivedValues = extraValues
 	return f.installErr
 }
 
@@ -168,6 +170,13 @@ var _ = Describe("Manager", func() {
 			Expect(cilium.installCalled).To(BeTrue())
 			Expect(metallb.installCalled).To(BeTrue())
 			Expect(metallb.configureCalled).To(BeTrue())
+		})
+
+		It("enables eBPF masquerade, without which cross-cluster pod traffic silently hangs", func() {
+			err := manager.installCNIAndLoadBalancer("ctx", "10.0.0.2", 1, opts)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cilium.receivedValues).To(HaveKeyWithValue("bpf", map[string]interface{}{"masquerade": true}))
 		})
 	})
 
