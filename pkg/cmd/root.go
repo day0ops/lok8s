@@ -188,7 +188,7 @@ func createCmd() *cobra.Command {
 				Project:              project,
 				Environment:          environment,
 				NumClusters:          numClusters,
-				NodeCount:            nodeCount,
+				NodeCount:            resolveNodeCountOverride(cmd),
 				K8sVersion:           k8sVersion,
 				GatewayIP:            gatewayIP,
 				SubnetCIDR:           subnetCIDR,
@@ -312,6 +312,24 @@ func createCmd() *cobra.Command {
 	}
 
 	return cmd
+}
+
+// resolveNodeCountOverride returns the --nodes value if it was explicitly
+// passed on the command line, or -1 ("not specified") otherwise. NodeCount's
+// valid range includes 0 (control-plane only, no workers), so the
+// zero-value-means-unset convention used for the rest of ProjectConfig's
+// fields can't distinguish --nodes 0 from the flag never being passed;
+// cmd.Flags().Changed is used instead.
+func resolveNodeCountOverride(cmd *cobra.Command) int {
+	if !cmd.Flags().Changed("nodes") {
+		return -1
+	}
+	value, err := cmd.Flags().GetInt("nodes")
+	if err != nil {
+		logger.Warnf("failed to read nodes flag: %v", err)
+		return -1
+	}
+	return value
 }
 
 // deleteCmd deletes clusters using the specified environment

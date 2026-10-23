@@ -281,6 +281,9 @@ func (cm *ConfigManager) MergeConfig(project string, cmdConfig *ProjectConfig) (
 
 	// if no saved config, use command line config as-is
 	if savedConfig == nil {
+		if cmdConfig.NodeCount < 0 {
+			cmdConfig.NodeCount = DefaultNodeCount
+		}
 		return cmdConfig, nil
 	}
 
@@ -297,7 +300,10 @@ func (cm *ConfigManager) MergeConfig(project string, cmdConfig *ProjectConfig) (
 	if cmdConfig.NumClusters > 0 {
 		mergedConfig.NumClusters = cmdConfig.NumClusters
 	}
-	if cmdConfig.NodeCount > 0 {
+	// NodeCount's valid range includes 0 (control-plane only, no workers), so
+	// -1 is used as the "not explicitly passed" sentinel instead of the
+	// zero-value convention every other field here relies on.
+	if cmdConfig.NodeCount >= 0 {
 		mergedConfig.NodeCount = cmdConfig.NodeCount
 	}
 	if cmdConfig.K8sVersion != "" {

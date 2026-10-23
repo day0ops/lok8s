@@ -185,6 +185,23 @@ var _ = Describe("Cmd", func() {
 				Expect(createCommand.MarkFlagRequired("project")).NotTo(HaveOccurred())
 			})
 		})
+
+		Context("NodeCount override resolution", func() {
+			It("should return -1 when --nodes was not explicitly passed", func() {
+				Expect(createCommand.Flags().Changed("nodes")).To(BeFalse())
+				Expect(resolveNodeCountOverride(createCommand)).To(Equal(-1))
+			})
+
+			It("should return 0 when --nodes 0 was explicitly passed", func() {
+				Expect(createCommand.Flags().Set("nodes", "0")).NotTo(HaveOccurred())
+				Expect(resolveNodeCountOverride(createCommand)).To(Equal(0))
+			})
+
+			It("should return the explicit value when --nodes was explicitly passed", func() {
+				Expect(createCommand.Flags().Set("nodes", "5")).NotTo(HaveOccurred())
+				Expect(resolveNodeCountOverride(createCommand)).To(Equal(5))
+			})
+		})
 	})
 
 	Describe("Delete Command", func() {

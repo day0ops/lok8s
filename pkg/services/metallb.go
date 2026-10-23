@@ -49,6 +49,15 @@ type MetalLBManager struct {
 	allNodeIPs    map[int]bool                         // tracks all node IPs across clusters
 }
 
+// MetalLBInstaller is satisfied by *MetalLBManager. Callers that only need to
+// install and configure MetalLB can depend on this instead of the concrete
+// type, so tests can inject a fake that fails on demand.
+type MetalLBInstaller interface {
+	InitializeTracking(project string) error
+	InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}) error
+	ConfigureMetalLB(clusterName, ip string, clusterNumber, totalClusters int, project string) error
+}
+
 // NewMetalLBManager creates a new MetalLB manager
 func NewMetalLBManager(helmManager *helm.HelmManager) *MetalLBManager {
 	return &MetalLBManager{
@@ -158,11 +167,6 @@ func (mm *MetalLBManager) SaveAllocation(project string, allocation *config.Meta
 
 	logger.Debugf("saved MetalLB allocation for cluster %s: %s", allocation.ClusterName, allocation.IPRange)
 	return nil
-}
-
-// InstallMetalLB installs MetalLB using Helm
-func (mm *MetalLBManager) InstallMetalLB(clusterName string) error {
-	return mm.InstallMetalLBWithValues(clusterName, nil)
 }
 
 // InstallMetalLBWithValues installs MetalLB using Helm, merging extraValues

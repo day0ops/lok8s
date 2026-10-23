@@ -41,6 +41,14 @@ type CiliumManager struct {
 	binaryManager BinaryManagerInterface
 }
 
+// CiliumInstaller is satisfied by *CiliumManager. Callers that only need to
+// install Cilium (not generate manifests or manage binaries) can depend on
+// this instead of the concrete type, so tests can inject a fake that fails on
+// demand.
+type CiliumInstaller interface {
+	InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error
+}
+
 // BinaryManagerInterface defines the interface for binary management
 type BinaryManagerInterface interface {
 	GetBinaryPath() (string, error)
@@ -52,11 +60,6 @@ func NewCiliumManager(helmManager *helm.HelmManager, binaryManager BinaryManager
 		helmManager:   helmManager,
 		binaryManager: binaryManager,
 	}
-}
-
-// InstallCilium installs Cilium using Helm
-func (cm *CiliumManager) InstallCilium(clusterName string) error {
-	return cm.InstallCiliumWithValues(clusterName, nil)
 }
 
 // InstallCiliumWithValues installs Cilium using Helm, merging extraValues over

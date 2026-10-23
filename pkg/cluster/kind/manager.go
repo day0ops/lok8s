@@ -50,8 +50,8 @@ import (
 type Manager struct {
 	provider             *cluster.Provider
 	helmManager          *helm.HelmManager
-	metallbManager       *services.MetalLBManager
-	ciliumManager        *services.CiliumManager
+	metallbManager       services.MetalLBInstaller
+	ciliumManager        services.CiliumInstaller
 	cloudProviderManager *services.CloudProviderKindManager
 }
 
@@ -243,28 +243,9 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
 		}
 
-		if opts.InstallMetalLB {
-			// initialize tracking before first cluster configuration
-			if i == 1 {
-				if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
-					logger.Warnf("failed to initialize MetalLB tracking: %v", err)
-				}
-			}
-
-			if err := m.metallbManager.InstallMetalLB(contextName); err != nil {
-				logger.Errorf("failed to install MetalLB on %s: %v", contextName, err)
-			} else {
-				// configure MetalLB after installation
-				// get cluster IP for kind (using container runtime inspect)
-				clusterIP, err := m.getKindClusterIP(clusterName)
-				if err != nil {
-					logger.Errorf("failed to get Kind cluster IP for %s: %v", clusterName, err)
-				} else {
-					if err := m.metallbManager.ConfigureMetalLB(contextName, clusterIP, i, opts.NumClusters, opts.Project); err != nil {
-						logger.Errorf("failed to configure MetalLB on %s: %v", contextName, err)
-					}
-				}
-			}
+		if err := m.installLoadBalancer(clusterName, contextName, i, opts); err != nil {
+			m.cleanupFailedCluster(clusterName, contextName)
+			return fmt.Errorf("failed to provision cluster %s: %w", clusterName, err)
 		}
 
 		if opts.InstallCloudProvider {
@@ -273,11 +254,9 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 			}
 		}
 
-		// install cilium after cluster creation (only if cilium CNI is selected)
-		if opts.CNI == "cilium" {
-			if err := m.ciliumManager.InstallCilium(contextName); err != nil {
-				logger.Errorf("failed to install Cilium on %s: %v", contextName, err)
-			}
+		if err := m.installCNI(contextName, opts); err != nil {
+			m.cleanupFailedCluster(clusterName, contextName)
+			return fmt.Errorf("failed to provision cluster %s: %w", clusterName, err)
 		}
 	}
 
@@ -289,6 +268,69 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	}
 
 	return nil
+}
+
+// installLoadBalancer installs and configures MetalLB if requested. Errors
+// are returned rather than logged-and-ignored so the caller can treat a
+// half-provisioned cluster as a failure instead of reporting success.
+func (m *Manager) installLoadBalancer(clusterName, contextName string, clusterIndex int, opts *CreateOptions) error {
+	if !opts.InstallMetalLB {
+		return nil
+	}
+
+	// initialize tracking before first cluster configuration
+	if clusterIndex == 1 {
+		if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
+			logger.Warnf("failed to initialize MetalLB tracking: %v", err)
+		}
+	}
+
+	if err := m.metallbManager.InstallMetalLBWithValues(contextName, nil); err != nil {
+		return fmt.Errorf("failed to install MetalLB on %s: %w", contextName, err)
+	}
+
+	// get cluster IP for kind (using container runtime inspect)
+	clusterIP, err := m.getKindClusterIP(clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to get Kind cluster IP for %s: %w", clusterName, err)
+	}
+
+	if err := m.metallbManager.ConfigureMetalLB(contextName, clusterIP, clusterIndex, opts.NumClusters, opts.Project); err != nil {
+		return fmt.Errorf("failed to configure MetalLB on %s: %w", contextName, err)
+	}
+
+	return nil
+}
+
+// installCNI installs Cilium if selected as the CNI plugin. Errors are
+// returned rather than logged-and-ignored so the caller can treat a
+// half-provisioned cluster as a failure instead of reporting success.
+func (m *Manager) installCNI(contextName string, opts *CreateOptions) error {
+	if opts.CNI != "cilium" {
+		return nil
+	}
+
+	if err := m.ciliumManager.InstallCiliumWithValues(contextName, nil); err != nil {
+		return fmt.Errorf("failed to install Cilium on %s: %w", contextName, err)
+	}
+
+	return nil
+}
+
+// cleanupFailedCluster deletes a freshly created kind cluster and its
+// kubeconfig context. Used when a cluster boots successfully but CNI or load
+// balancer provisioning fails partway through - leaving it running would
+// otherwise be a half-working cluster masquerading as created.
+func (m *Manager) cleanupFailedCluster(clusterName, contextName string) {
+	if err := m.cloudProviderManager.Terminate(contextName, false); err != nil {
+		logger.Warnf("failed to terminate cloud-provider-kind process for context %s during cleanup: %v", contextName, err)
+	}
+	if err := m.provider.Delete(clusterName, ""); err != nil {
+		logger.Warnf("failed to delete cluster %s during cleanup: %v", clusterName, err)
+	}
+	if err := k8s.DeleteContext(contextName); err != nil {
+		logger.Warnf("failed to delete context %s during cleanup: %v", contextName, err)
+	}
 }
 
 // DeleteClusters deletes multiple kind clusters

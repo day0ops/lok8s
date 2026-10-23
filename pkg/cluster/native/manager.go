@@ -46,8 +46,8 @@ import (
 type Manager struct {
 	client         NodeClient
 	helmManager    *helm.HelmManager
-	ciliumManager  *services.CiliumManager
-	metallbManager *services.MetalLBManager
+	ciliumManager  services.CiliumInstaller
+	metallbManager services.MetalLBInstaller
 }
 
 // CreateOptions contains options for creating native clusters
@@ -178,63 +178,9 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
 		}
 
-		// Cilium must install before MetalLB: unlike kind/minikube's shared-kernel
-		// containers, native nodes have no pod networking at all until Cilium is
-		// up, and MetalLB's controller/speaker pods (unlike Cilium's own
-		// daemonset, which runs on the host network) need it to reach Ready -
-		// installing MetalLB first would otherwise hang until its own helm
-		// install timeout.
-		//
-		// kubeProxyReplacement is also required: cross-node pod traffic to a
-		// ClusterIP backed by a host-networked pod (like k3s's own apiserver
-		// Service) hangs on TLS handshakes under kube-proxy's iptables DNAT
-		// in this environment. k3s's own kube-proxy is left running (see
-		// controlPlaneArgs) since Cilium's replacement intercepts ahead of
-		// it once up, without leaving a gap before Cilium itself is ready.
-		ciliumValues := map[string]interface{}{
-			"kubeProxyReplacement": true,
-			"k8sServiceHost":       cpIP,
-			"k8sServicePort":       k3sAPIPort,
-		}
-		if err := m.ciliumManager.InstallCiliumWithValues(contextName, ciliumValues); err != nil {
-			logger.Errorf("failed to install Cilium on %s: %v", contextName, err)
-		}
-
-		if opts.InstallMetalLB {
-			// initialize tracking before first cluster configuration
-			if i == 1 {
-				if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
-					logger.Warnf("failed to initialize MetalLB tracking: %v", err)
-				}
-			}
-
-			// pin the controller to the control-plane node: the apiserver's
-			// admission webhook calls to it hang when it lands on a worker
-			// node, the same cross-node-to-remote-pod-IP hang diagnosed for
-			// the apiserver's own Service traffic above, but this path
-			// (a direct apiserver-to-endpoint-IP dial for webhook calls)
-			// isn't covered by Cilium's kube-proxy replacement since it
-			// bypasses Service resolution entirely.
-			metallbValues := map[string]interface{}{
-				"controller": map[string]interface{}{
-					"resources": map[string]interface{}{
-						"requests": map[string]interface{}{
-							"cpu":    "100m",
-							"memory": "100Mi",
-						},
-					},
-					"nodeSelector": map[string]interface{}{
-						"node-role.kubernetes.io/control-plane": "true",
-					},
-				},
-			}
-			if err := m.metallbManager.InstallMetalLBWithValues(contextName, metallbValues); err != nil {
-				logger.Errorf("failed to install MetalLB on %s: %v", contextName, err)
-			} else {
-				if err := m.metallbManager.ConfigureMetalLB(contextName, cpIP, i, opts.NumClusters, opts.Project); err != nil {
-					logger.Errorf("failed to configure MetalLB on %s: %v", contextName, err)
-				}
-			}
+		if err := m.installCNIAndLoadBalancer(contextName, cpIP, i, opts); err != nil {
+			m.cleanupFailedCluster(clusterName, contextName)
+			return fmt.Errorf("failed to provision cluster %s: %w", clusterName, err)
 		}
 	}
 
@@ -245,6 +191,91 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	}
 
 	return nil
+}
+
+// installCNIAndLoadBalancer installs Cilium, and MetalLB if requested, on a
+// freshly booted cluster. Errors are returned rather than logged-and-ignored
+// so the caller can treat a half-provisioned cluster as a failure instead of
+// reporting success.
+//
+// Cilium must install before MetalLB: unlike kind/minikube's shared-kernel
+// containers, native nodes have no pod networking at all until Cilium is up,
+// and MetalLB's controller/speaker pods (unlike Cilium's own daemonset,
+// which runs on the host network) need it to reach Ready - installing
+// MetalLB first would otherwise hang until its own helm install timeout.
+func (m *Manager) installCNIAndLoadBalancer(contextName, cpIP string, clusterIndex int, opts *CreateOptions) error {
+	// kubeProxyReplacement is required: cross-node pod traffic to a ClusterIP
+	// backed by a host-networked pod (like k3s's own apiserver Service) hangs
+	// on TLS handshakes under kube-proxy's iptables DNAT in this environment.
+	// k3s's own kube-proxy is left running (see controlPlaneArgs) since
+	// Cilium's replacement intercepts ahead of it once up, without leaving a
+	// gap before Cilium itself is ready.
+	ciliumValues := map[string]interface{}{
+		"kubeProxyReplacement": true,
+		"k8sServiceHost":       cpIP,
+		"k8sServicePort":       k3sAPIPort,
+	}
+	if err := m.ciliumManager.InstallCiliumWithValues(contextName, ciliumValues); err != nil {
+		return fmt.Errorf("failed to install Cilium on %s: %w", contextName, err)
+	}
+
+	if !opts.InstallMetalLB {
+		return nil
+	}
+
+	// initialize tracking before first cluster configuration
+	if clusterIndex == 1 {
+		if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
+			logger.Warnf("failed to initialize MetalLB tracking: %v", err)
+		}
+	}
+
+	// pin the controller to the control-plane node: the apiserver's admission
+	// webhook calls to it hang when it lands on a worker node, the same
+	// cross-node-to-remote-pod-IP hang diagnosed for the apiserver's own
+	// Service traffic above, but this path (a direct apiserver-to-endpoint-IP
+	// dial for webhook calls) isn't covered by Cilium's kube-proxy
+	// replacement since it bypasses Service resolution entirely.
+	metallbValues := map[string]interface{}{
+		"controller": map[string]interface{}{
+			"resources": map[string]interface{}{
+				"requests": map[string]interface{}{
+					"cpu":    "100m",
+					"memory": "100Mi",
+				},
+			},
+			"nodeSelector": map[string]interface{}{
+				"node-role.kubernetes.io/control-plane": "true",
+			},
+		},
+	}
+	if err := m.metallbManager.InstallMetalLBWithValues(contextName, metallbValues); err != nil {
+		return fmt.Errorf("failed to install MetalLB on %s: %w", contextName, err)
+	}
+	if err := m.metallbManager.ConfigureMetalLB(contextName, cpIP, clusterIndex, opts.NumClusters, opts.Project); err != nil {
+		return fmt.Errorf("failed to configure MetalLB on %s: %w", contextName, err)
+	}
+
+	return nil
+}
+
+// cleanupFailedCluster deletes every node belonging to clusterName and its
+// kubeconfig context. Used when a cluster's nodes boot successfully but CNI
+// or load balancer provisioning fails partway through - leaving it running
+// would otherwise be a half-working cluster masquerading as created.
+func (m *Manager) cleanupFailedCluster(clusterName, contextName string) {
+	nodeNames, err := m.nodeNamesForCluster(clusterName)
+	if err != nil {
+		logger.Warnf("failed to list nodes for cluster %s during cleanup: %v", clusterName, err)
+	} else if len(nodeNames) > 0 {
+		if err := m.client.Delete(nodeNames...); err != nil {
+			logger.Warnf("failed to clean up nodes for cluster %s, they may need manual removal: %v", clusterName, err)
+		}
+	}
+
+	if err := k8s.DeleteContext(contextName); err != nil {
+		logger.Warnf("failed to delete context %s during cleanup: %v", contextName, err)
+	}
 }
 
 // DeleteClusters deletes multiple native clusters

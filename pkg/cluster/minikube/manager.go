@@ -58,7 +58,7 @@ type Manager struct {
 	binaryManager  *BinaryManager
 	helmManager    *helm.HelmManager
 	ciliumManager  *services.CiliumManager
-	metallbManager *services.MetalLBManager
+	metallbManager services.MetalLBInstaller
 }
 
 // CreateOptions contains options for creating minikube clusters
@@ -170,27 +170,9 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
 		}
 
-		if opts.InstallMetalLB {
-			// initialize tracking before first cluster configuration
-			if i == 1 {
-				if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
-					logger.Warnf("failed to initialize MetalLB tracking: %v", err)
-				}
-			}
-
-			if err := m.metallbManager.InstallMetalLB(clusterName); err != nil {
-				logger.Errorf("failed to install MetalLB on %s: %v", clusterName, err)
-			}
-
-			// configure MetalLB after installation
-			var ipAddress string
-			if ipAddress, err = m.getMinikubeIP(clusterName); err != nil {
-				logger.Errorf("failed to get Minikube IP for cluster %s: %v", clusterName, err)
-			} else {
-				if err := m.metallbManager.ConfigureMetalLB(clusterName, ipAddress, i, opts.NumClusters, opts.Project); err != nil {
-					logger.Errorf("failed to configure MetalLB on %s: %v", clusterName, err)
-				}
-			}
+		if err := m.installLoadBalancer(clusterName, i, opts); err != nil {
+			m.cleanupFailedCluster(clusterName)
+			return fmt.Errorf("failed to provision cluster %s: %w", clusterName, err)
 		}
 
 		// enable CSI support
@@ -212,6 +194,54 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	}
 
 	return nil
+}
+
+// installLoadBalancer installs and configures MetalLB if requested. Errors
+// are returned rather than logged-and-ignored so the caller can treat a
+// half-provisioned cluster as a failure instead of reporting success.
+func (m *Manager) installLoadBalancer(clusterName string, clusterIndex int, opts *CreateOptions) error {
+	if !opts.InstallMetalLB {
+		return nil
+	}
+
+	// initialize tracking before first cluster configuration
+	if clusterIndex == 1 {
+		if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
+			logger.Warnf("failed to initialize MetalLB tracking: %v", err)
+		}
+	}
+
+	if err := m.metallbManager.InstallMetalLBWithValues(clusterName, nil); err != nil {
+		return fmt.Errorf("failed to install MetalLB on %s: %w", clusterName, err)
+	}
+
+	ipAddress, err := m.getMinikubeIP(clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to get Minikube IP for cluster %s: %w", clusterName, err)
+	}
+
+	if err := m.metallbManager.ConfigureMetalLB(clusterName, ipAddress, clusterIndex, opts.NumClusters, opts.Project); err != nil {
+		return fmt.Errorf("failed to configure MetalLB on %s: %w", clusterName, err)
+	}
+
+	return nil
+}
+
+// cleanupFailedCluster deletes a freshly created minikube cluster. Used when
+// a cluster boots successfully but load balancer provisioning fails partway
+// through - leaving it running would otherwise be a half-working cluster
+// masquerading as created. minikube's own delete already tears down its
+// kubeconfig context, unlike kind/native which need a separate call.
+func (m *Manager) cleanupFailedCluster(clusterName string) {
+	binaryPath, err := m.binaryManager.GetBinaryPath()
+	if err != nil {
+		logger.Warnf("failed to get minikube binary path during cleanup: %v", err)
+		return
+	}
+
+	if err := m.deleteCluster(binaryPath, clusterName, false); err != nil {
+		logger.Warnf("failed to delete cluster %s during cleanup: %v", clusterName, err)
+	}
 }
 
 // DeleteClusters deletes multiple minikube clusters
