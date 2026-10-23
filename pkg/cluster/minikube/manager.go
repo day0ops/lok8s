@@ -844,8 +844,16 @@ type minikubeProfileList struct {
 	Valid []minikubeProfile `json:"valid"`
 }
 
-// ListProfileNames returns the names of all existing minikube profiles
+// ListProfileNames returns the names of all existing minikube profiles. If
+// the minikube binary hasn't been downloaded yet, this reports no profiles
+// rather than downloading several hundred MB just to ask - unlike every
+// other Manager method, this one is also reached by lok8s's unified `list`
+// command, which checks all providers regardless of which one is in use.
 func (m *Manager) ListProfileNames() ([]string, error) {
+	if !m.binaryManager.IsBinaryAvailable() {
+		return nil, nil
+	}
+
 	binaryPath, err := m.binaryManager.GetBinaryPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get minikube binary path: %w", err)

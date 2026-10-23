@@ -341,9 +341,10 @@ func deleteCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "delete",
-		Short: "Delete Kubernetes clusters",
-		Long:  `Delete one or more Kubernetes clusters`,
+		Use:          "delete",
+		Short:        "Delete Kubernetes clusters",
+		Long:         `Delete one or more Kubernetes clusters`,
+		SilenceUsage: true, // dont display usage for errors
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// check if running as sudo/root
 			if syscall.Geteuid() == 0 {
@@ -731,9 +732,10 @@ func imageLoadCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "image-load",
-		Short: "Load Docker images into clusters",
-		Long:  `Load a Docker image into all clusters for a project`,
+		Use:          "image-load",
+		Short:        "Load Docker images into clusters",
+		Long:         `Load a Docker image into all clusters for a project`,
+		SilenceUsage: true, // dont display usage for errors
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if project == "" {
 				return fmt.Errorf("project name is required")
@@ -827,7 +829,7 @@ func configCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Manage project configurations",
-		Long:  `Manage project-specific configuration files stored in $HOME/.lok8/`,
+		Long:  `Manage project-specific configuration files stored in $HOME/.lok8s`,
 	}
 
 	// list command

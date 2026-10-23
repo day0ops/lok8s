@@ -29,6 +29,17 @@ import (
 	. "github.com/onsi/gomega"
 )
 
+var _ = Describe("BinaryManager", func() {
+	Describe("IsBinaryAvailable", func() {
+		It("reports false without downloading when no binary is cached", func() {
+			bm := NewBinaryManager()
+			bm.SetCacheDir(GinkgoT().TempDir())
+
+			Expect(bm.IsBinaryAvailable()).To(BeFalse())
+		})
+	})
+})
+
 // fakeMetalLBInstaller is a test double for services.MetalLBInstaller.
 type fakeMetalLBInstaller struct {
 	installErr    error
@@ -72,6 +83,19 @@ var _ = Describe("Manager", func() {
 
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("metallb boom"))
+		})
+	})
+
+	Describe("ListProfileNames", func() {
+		It("returns no profiles without downloading the binary when it isn't already present", func() {
+			bm := NewBinaryManager()
+			bm.SetCacheDir(GinkgoT().TempDir())
+			manager := &Manager{binaryManager: bm}
+
+			names, err := manager.ListProfileNames()
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(names).To(BeEmpty())
 		})
 	})
 })

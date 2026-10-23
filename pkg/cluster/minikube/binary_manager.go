@@ -79,6 +79,12 @@ func (bm *BinaryManager) EnsureBinary() error {
 	return nil
 }
 
+// IsBinaryAvailable reports whether a valid minikube binary is already
+// present locally, without downloading one if it isn't.
+func (bm *BinaryManager) IsBinaryAvailable() bool {
+	return bm.isBinaryValid()
+}
+
 // GetBinaryPath returns the path to the minikube binary
 func (bm *BinaryManager) GetBinaryPath() (string, error) {
 	if err := bm.EnsureBinary(); err != nil {
