@@ -108,9 +108,8 @@ jobs:
           # Get the tag name from the ref that triggered the workflow
           TAG_NAME=${GITHUB_REF#refs/tags/}
           echo "TAG_NAME=$TAG_NAME" >> $GITHUB_OUTPUT
-          # Get the version without 'v' prefix for display
+          # Get the version without 'v' prefix, used below for the prerelease check
           VERSION=${TAG_NAME#v}
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
           # Check if this is a prerelease (contains '-')
           if [[ "$VERSION" == *"-"* ]]; then
             echo "PRERELEASE=true" >> $GITHUB_OUTPUT
@@ -121,7 +120,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "lok8s ${{ steps.version.outputs.VERSION }}"
+          name: ${{ steps.version.outputs.TAG_NAME }}
           tag_name: ${{ steps.version.outputs.TAG_NAME }}
           files: |
             binaries/lok8s-*
