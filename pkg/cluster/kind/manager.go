@@ -181,17 +181,112 @@ func getAvailableRegistryPort() (int, error) {
 	return 0, errors.New("no available ports found above 30000")
 }
 
-// NewManager creates a new kind manager
+// NewManager creates a new kind manager. provider is left unconfigured -
+// ensureProvider must run before it's used, since which container engine to
+// drive it with is only known once the caller resolves one (see
+// resolveContainerEngine).
 func NewManager() *Manager {
 	k8sConfigPath, _ := k8s.GetKubeConfigPath()
 	helmManager := helm.NewHelmManager(k8sConfigPath)
 	return &Manager{
-		provider:             cluster.NewProvider(),
 		helmManager:          helmManager,
 		metallbManager:       services.NewMetalLBManager(helmManager),
 		ciliumManager:        services.NewCiliumManager(helmManager, nil), // kind doesn't need binary manager
 		cloudProviderManager: services.NewCloudProviderKindManager(),
 	}
+}
+
+// resolveContainerEngine returns preferredEngine if the caller already
+// determined one, or the auto-detected engine otherwise.
+func resolveContainerEngine(preferredEngine string) (string, error) {
+	if preferredEngine != "" {
+		return preferredEngine, nil
+	}
+	return docker.GetContainerRuntime()
+}
+
+// ensureProvider (re)configures the kind SDK's cluster.Provider to use the
+// container engine lok8s has already determined is actually working, rather
+// than relying on the SDK's own auto-detection: cluster.NewProvider() with no
+// options only checks `docker -v` (the client binary printing its own
+// version string), which succeeds even when the Docker daemon itself isn't
+// reachable - so it always prefers a non-functional Docker install over a
+// working Podman one, exactly backwards from what lok8s's own
+// daemon-connectivity-based detection (docker.GetContainerRuntime) already
+// worked out.
+func (m *Manager) ensureProvider(preferredEngine string) error {
+	engine, err := resolveContainerEngine(preferredEngine)
+	if err != nil {
+		return err
+	}
+
+	switch engine {
+	case "podman":
+		m.provider = cluster.NewProvider(cluster.ProviderWithPodman())
+	case "docker":
+		m.provider = cluster.NewProvider(cluster.ProviderWithDocker())
+	default:
+		return fmt.Errorf("unsupported container engine: %s", engine)
+	}
+	return nil
+}
+
+// ciliumRequiresRootfulPodman reports whether the given combination of
+// container engine and CNI choice is one the Linux kernel is guaranteed to
+// break: Cilium's init containers need to mount the bpf filesystem, which the
+// kernel refuses from inside any non-initial user namespace - the namespace
+// every container gets under rootless Podman, regardless of capabilities or
+// --privileged. This holds even with a fully --privileged container; it's a
+// kernel policy, not a missing capability.
+func ciliumRequiresRootfulPodman(containerRuntime, cni string, podmanRootless bool) bool {
+	return containerRuntime == "podman" && cni == "cilium" && podmanRootless
+}
+
+// podmanIsRootless reports whether the local podman installation is running
+// rootless.
+func podmanIsRootless() (bool, error) {
+	cmd := exec.Command("podman", "info", "--format", "{{.Host.Security.Rootless}}")
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to check podman rootless status: %w", err)
+	}
+	return strings.TrimSpace(string(output)) == "true", nil
+}
+
+// checkPodmanCiliumCompatibility fails fast with an actionable error when
+// Cilium is selected under a rootless Podman engine, rather than letting
+// cluster creation hang for minutes on an opaque DaemonSet-not-ready timeout
+// before failing with no clear explanation of why.
+func checkPodmanCiliumCompatibility(containerRuntime, cni string) error {
+	if containerRuntime != "podman" || cni != "cilium" {
+		return nil
+	}
+
+	rootless, err := podmanIsRootless()
+	if err != nil {
+		// best-effort: don't block cluster creation if rootless status can't
+		// be determined, so an unexpected podman CLI change doesn't become a
+		// hard failure for an unrelated reason
+		logger.Debugf("failed to determine podman rootless status: %v", err)
+		return nil
+	}
+
+	if ciliumRequiresRootfulPodman(containerRuntime, cni, rootless) {
+		return fmt.Errorf("cilium cannot run on a rootless Podman installation: its init containers need to mount the bpf filesystem, which the Linux kernel blocks from inside any non-initial user namespace (the namespace every container gets under rootless Podman), regardless of capabilities. Use a rootful Podman machine ('podman machine init --rootful'), Docker, or '--cni kindnet'")
+	}
+
+	return nil
+}
+
+// isSupportedKindCNI reports whether cni is one kind's manager actually knows
+// how to provision: cilium (installed via Helm) or kindnet (kind's own
+// built-in default, left enabled by createKindConfig instead of disabled).
+// flannel and calico pass the generic --cni flag validation shared across
+// all three providers, but kind has no install path for them - unlike
+// native, which rejects anything but cilium outright, kind used to silently
+// accept them and produce a cluster with no pod networking at all.
+func isSupportedKindCNI(cni string) bool {
+	return cni == "cilium" || cni == "kindnet"
 }
 
 // CreateClusters creates multiple kind clusters
@@ -201,6 +296,20 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	// check prerequisites
 	if err := m.checkPrerequisites(opts.PreferredContainerEngine); err != nil {
 		return fmt.Errorf("prerequisites check failed: %w", err)
+	}
+
+	if !isSupportedKindCNI(opts.CNI) {
+		return fmt.Errorf("the kind provider only supports the cilium or kindnet CNI, got: %s", opts.CNI)
+	}
+
+	// opts.PreferredContainerEngine is already resolved and verified running
+	// by checkPrerequisites above
+	if err := m.ensureProvider(opts.PreferredContainerEngine); err != nil {
+		return fmt.Errorf("failed to configure container engine: %w", err)
+	}
+
+	if err := checkPodmanCiliumCompatibility(opts.PreferredContainerEngine, opts.CNI); err != nil {
+		return err
 	}
 
 	// validate load balancer options - MetalLB and cloud-provider-kind cannot coexist
@@ -302,9 +411,11 @@ func (m *Manager) installLoadBalancer(clusterName, contextName string, clusterIn
 	return nil
 }
 
-// installCNI installs Cilium if selected as the CNI plugin. Errors are
-// returned rather than logged-and-ignored so the caller can treat a
-// half-provisioned cluster as a failure instead of reporting success.
+// installCNI installs Cilium if selected as the CNI plugin. kindnet (the
+// only other CNI CreateClusters allows through, see isSupportedKindCNI) needs
+// no separate install step - createKindConfig already leaves it enabled.
+// Errors are returned rather than logged-and-ignored so the caller can treat
+// a half-provisioned cluster as a failure instead of reporting success.
 func (m *Manager) installCNI(contextName string, opts *CreateOptions) error {
 	if opts.CNI != "cilium" {
 		return nil
@@ -495,8 +606,17 @@ func (m *Manager) printClusterStatusTable(opts *StatusOptions) error {
 	return nil
 }
 
-// ListClusterNames returns the names of all existing Kind clusters using the SDK
+// ListClusterNames returns the names of all existing Kind clusters using the
+// SDK. Every other method that needs the provider (DeleteClusters,
+// StatusClusters, LoadImage) reaches it through here first, so configuring
+// the provider in this one place is enough to cover them all - this is also
+// the only entry point reached directly from lok8s's unified `list` command,
+// which has no engine preference to pass in at all.
 func (m *Manager) ListClusterNames() ([]string, error) {
+	if err := m.ensureProvider(""); err != nil {
+		return nil, fmt.Errorf("failed to configure container engine: %w", err)
+	}
+
 	// docker/podman exits 0 with an empty result when there are genuinely no
 	// clusters, so any error here reflects a real problem (e.g. the container
 	// runtime not running) and must not be swallowed as "no clusters".
@@ -710,7 +830,7 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 	}
 
 	// Create temporary config file (needs registry port for containerd config)
-	configPath, err := m.createKindConfig(clusterName, kindestNode, nodeCount, clusterIndex, cpPort, regPort)
+	configPath, err := m.createKindConfig(clusterName, kindestNode, nodeCount, clusterIndex, cpPort, regPort, opts.CNI)
 	if err != nil {
 		return fmt.Errorf("failed to create kind config: %w", err)
 	}
@@ -823,7 +943,7 @@ func (m *Manager) updateClusterContext(clusterName, port string) error {
 }
 
 // createKindConfig creates a kind cluster configuration file
-func (m *Manager) createKindConfig(clusterName, kindestNode string, nodeCount, clusterIndex int, cpPort string, regPort int) (string, error) {
+func (m *Manager) createKindConfig(clusterName, kindestNode string, nodeCount, clusterIndex int, cpPort string, regPort int, cni string) (string, error) {
 	region := getRegion(clusterIndex - 1)
 	zone := getZone(clusterIndex - 1)
 
@@ -862,10 +982,14 @@ nodes:
 `, kindestNode)
 	}
 
-	// Add advanced network configuration
-	clusterConfig += `networking:
-  disableDefaultCNI: true
-  serviceSubnet: "10.255.100.0/24"
+	// Add advanced network configuration. kindnet is kind's own built-in
+	// default CNI, so the only way to actually use it is to leave it enabled
+	// rather than disabling it like every other (externally installed) CNI.
+	clusterConfig += "networking:\n"
+	if cni != "kindnet" {
+		clusterConfig += "  disableDefaultCNI: true\n"
+	}
+	clusterConfig += `  serviceSubnet: "10.255.100.0/24"
   podSubnet: "10.100.0.0/16"
 `
 

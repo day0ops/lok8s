@@ -211,6 +211,10 @@ func (m *Manager) installLoadBalancer(clusterName string, clusterIndex int, opts
 		}
 	}
 
+	if err := m.removeExcludeFromLoadBalancersLabel(clusterName); err != nil {
+		logger.Warnf("failed to remove exclude-from-external-load-balancers label: %v", err)
+	}
+
 	if err := m.metallbManager.InstallMetalLBWithValues(clusterName, nil); err != nil {
 		return fmt.Errorf("failed to install MetalLB on %s: %w", clusterName, err)
 	}
@@ -692,6 +696,14 @@ func (m *Manager) setupNetworkAndDriver(project, bridge, subnetCIDR string) (Net
 	return nil, "", fmt.Errorf("unsupported operating system: %s", config.GetOS())
 }
 
+// minikubeTotalNodes converts lok8s's own NodeCount (worker nodes in
+// addition to the control-plane, matching kind's and native's semantics) to
+// the total node count minikube's own --nodes flag expects, which counts the
+// control-plane as one of the nodes.
+func minikubeTotalNodes(nodeCount int) int {
+	return nodeCount + 1
+}
+
 // createCluster creates a single minikube cluster
 func (m *Manager) createCluster(clusterName, k8sVersion, driver, cpu, memory, disk, networkName, cni, containerRuntime string, nodeCount, clusterIndex int, verbose bool) error {
 	// set environment variable to disable styling
@@ -729,7 +741,7 @@ func (m *Manager) createCluster(clusterName, k8sVersion, driver, cpu, memory, di
 		"--memory=" + memory,
 		"--disk-size=" + disk,
 		"--network=" + networkName,
-		"--nodes=" + strconv.Itoa(nodeCount),
+		"--nodes=" + strconv.Itoa(minikubeTotalNodes(nodeCount)),
 		"--service-cluster-ip-range=" + config.GetMinikubeServiceIPRange(clusterIndex),
 		"--extra-config=kubelet.node-labels=topology.kubernetes.io/region=" + region + ",topology.kubernetes.io/zone=" + zone,
 	}
@@ -1052,6 +1064,40 @@ func (m *Manager) enableMetricsServer(clusterName string) error {
 	}
 
 	logger.Debugf("✓ successfully enabled metrics-server addon for cluster %s", clusterName)
+	return nil
+}
+
+// removeExcludeFromLoadBalancersLabel removes the
+// node.kubernetes.io/exclude-from-external-load-balancers label that
+// kubeadm (and therefore minikube) applies to the control-plane node by
+// default. MetalLB's speaker DaemonSet refuses to schedule onto any node
+// carrying this label, so on a single-node cluster - just the control-plane -
+// it would otherwise have zero eligible nodes and never become ready,
+// matching the same fix kind's manager already applies to its own
+// control-plane nodes.
+func (m *Manager) removeExcludeFromLoadBalancersLabel(clusterName string) error {
+	clientManager, err := k8s.NewClientManagerForContext(clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client manager: %w", err)
+	}
+
+	nodes, err := clientManager.GetClientset().CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	for _, node := range nodes.Items {
+		if _, exists := node.Labels["node.kubernetes.io/exclude-from-external-load-balancers"]; !exists {
+			continue
+		}
+
+		delete(node.Labels, "node.kubernetes.io/exclude-from-external-load-balancers")
+		if _, err := clientManager.GetClientset().CoreV1().Nodes().Update(context.Background(), &node, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("failed to update node %s: %w", node.Name, err)
+		}
+		logger.Debugf("removed exclude-from-external-load-balancers label from node: %s", node.Name)
+	}
+
 	return nil
 }
 

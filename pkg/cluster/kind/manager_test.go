@@ -24,6 +24,7 @@ package kind
 
 import (
 	"errors"
+	"os"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -118,6 +119,84 @@ var _ = Describe("Manager", func() {
 
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("metallb boom"))
+		})
+	})
+
+	Describe("resolveContainerEngine", func() {
+		It("returns the preferred engine as-is without auto-detecting", func() {
+			engine, err := resolveContainerEngine("podman")
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(engine).To(Equal("podman"))
+		})
+	})
+
+	Describe("ensureProvider", func() {
+		It("returns an error for an unsupported container engine", func() {
+			manager := &Manager{}
+
+			err := manager.ensureProvider("bogus-engine")
+
+			Expect(err).To(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("unsupported container engine"))
+		})
+	})
+
+	Describe("ciliumRequiresRootfulPodman", func() {
+		It("is true only for podman + cilium + rootless", func() {
+			Expect(ciliumRequiresRootfulPodman("podman", "cilium", true)).To(BeTrue())
+		})
+
+		It("is false for docker even when rootless is somehow reported true", func() {
+			Expect(ciliumRequiresRootfulPodman("docker", "cilium", true)).To(BeFalse())
+		})
+
+		It("is false for a non-cilium CNI", func() {
+			Expect(ciliumRequiresRootfulPodman("podman", "flannel", true)).To(BeFalse())
+		})
+
+		It("is false when podman is rootful", func() {
+			Expect(ciliumRequiresRootfulPodman("podman", "cilium", false)).To(BeFalse())
+		})
+	})
+
+	Describe("isSupportedKindCNI", func() {
+		It("supports cilium and kindnet", func() {
+			Expect(isSupportedKindCNI("cilium")).To(BeTrue())
+			Expect(isSupportedKindCNI("kindnet")).To(BeTrue())
+		})
+
+		It("rejects flannel and calico, which have no install path for kind", func() {
+			Expect(isSupportedKindCNI("flannel")).To(BeFalse())
+			Expect(isSupportedKindCNI("calico")).To(BeFalse())
+		})
+	})
+
+	Describe("createKindConfig", func() {
+		var manager *Manager
+
+		BeforeEach(func() {
+			manager = &Manager{}
+		})
+
+		It("disables the default CNI when cilium is selected", func() {
+			configPath, err := manager.createKindConfig("test-cluster", "kindest/node:v1.31.0", 0, 1, "7001", 30000, "cilium")
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(configPath)
+
+			content, err := os.ReadFile(configPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(content)).To(ContainSubstring("disableDefaultCNI: true"))
+		})
+
+		It("leaves the default CNI enabled when kindnet is selected", func() {
+			configPath, err := manager.createKindConfig("test-cluster", "kindest/node:v1.31.0", 0, 1, "7001", 30000, "kindnet")
+			Expect(err).NotTo(HaveOccurred())
+			defer os.Remove(configPath)
+
+			content, err := os.ReadFile(configPath)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(string(content)).NotTo(ContainSubstring("disableDefaultCNI"))
 		})
 	})
 })

@@ -176,6 +176,10 @@ func (mm *MetalLBManager) SaveAllocation(project string, allocation *config.Meta
 // cross-node admission webhook call that hangs in that environment - adjust
 // the install without duplicating the repository-add/install/wait sequence.
 func (mm *MetalLBManager) InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}) error {
+	// pin to this cluster's context rather than the kubeconfig's shared,
+	// mutable current-context - see HelmManager.SetContext
+	mm.helmManager.SetContext(clusterName)
+
 	status := logger.NewStatus()
 	status.Start(fmt.Sprintf("installing MetalLB on cluster %s", clusterName))
 	defer func() {

@@ -98,4 +98,12 @@ var _ = Describe("Manager", func() {
 			Expect(names).To(BeEmpty())
 		})
 	})
+
+	Describe("minikubeTotalNodes", func() {
+		It("adds the control-plane to lok8s's own worker-count NodeCount", func() {
+			Expect(minikubeTotalNodes(0)).To(Equal(1))
+			Expect(minikubeTotalNodes(1)).To(Equal(2))
+			Expect(minikubeTotalNodes(2)).To(Equal(3))
+		})
+	})
 })

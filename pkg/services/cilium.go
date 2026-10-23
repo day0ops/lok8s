@@ -68,6 +68,10 @@ func NewCiliumManager(helmManager *helm.HelmManager, binaryManager BinaryManager
 // k3s's own kube-proxy in favor of Cilium's kube-proxy replacement - adjust
 // the install without duplicating the repository-add/install/wait sequence.
 func (cm *CiliumManager) InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error {
+	// pin to this cluster's context rather than the kubeconfig's shared,
+	// mutable current-context - see HelmManager.SetContext
+	cm.helmManager.SetContext(clusterName)
+
 	status := logger.NewStatus()
 	status.Start(fmt.Sprintf("installing Cilium on cluster %s", clusterName))
 	defer func() {
