@@ -71,6 +71,22 @@ const (
 
 	CloudProviderKindMinSupportedVersion = "0.8.0"
 
+	// Native (Apple Virtualization / `container` CLI) defaults
+	NativeContainerMinSupportedVersion = "1.2.1"
+	NativeNetworkNamePrefix            = "lok8s-"
+	NativeCPU                          = "2"
+	NativeMemory                       = "2G"
+
+	// Native on Linux (Incus) defaults. Unlike the macOS side, these haven't
+	// been verified against a real Incus install (see incus_client.go) - the
+	// version floor and image reference are best-effort defaults, not
+	// confirmed-working values.
+	NativeLinuxMinIncusVersion = "6.0"
+	NativeLinuxBaseImage       = "images:debian/12"
+	// NativeLinuxMemory uses Incus's "GiB" unit syntax; NativeCPU above is
+	// reused as-is since a bare number is valid for both platforms.
+	NativeLinuxMemory = "2GiB"
+
 	// LibVirt network template
 	NetworkTemplate = `
 <network>
@@ -92,9 +108,10 @@ var (
 	// Kubernetes version mappings
 	// refer to https://github.com/kubernetes-sigs/kind/releases for the latest builds
 	KindK8sVersions = map[string]string{
+		"1.37": "v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5",
 		"1.36": "v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
 		"1.35": "v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0",
-		"1.34": "v1.34.0@sha256:7416a61b42b1662ca6ca89f02028ac133a309a2a30ba309614e8ec94d976dc5a",
+		"1.34": "v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d",
 		"1.33": "v1.33.4@sha256:25a6018e48dfcaee478f4a59af81157a437f15e6e140bf103f85a2e7cd0cbbf2",
 		"1.32": "v1.32.8@sha256:abd489f042d2b644e2d033f5c2d900bc707798d075e8186cb65e3f1367a9d5a1",
 		"1.31": "v1.31.12@sha256:0f5cc49c5e73c0c2bb6e2df56e7df189240d83cf94edfa30946482eb08ec57d2",
@@ -104,10 +121,21 @@ var (
 
 	// https://github.com/kubernetes/minikube/blob/master/pkg/minikube/constants/constants.go
 	MinikubeK8sVersions = map[string]string{
+		"1.37": "1.37.1",
+		"1.36": "1.36.5",
 		"1.35": "1.35.1",
 		"1.34": "1.34.0",
 		"1.33": "1.33.1",
 		"1.32": "1.32.6",
+	}
+
+	// k3s image tags, see https://github.com/k3s-io/k3s/releases
+	NativeK8sVersions = map[string]string{
+		"1.37": "1.37.1+k3s1",
+		"1.36": "1.36.5+k3s1",
+		"1.35": "1.35.9+k3s1",
+		"1.34": "1.34.12+k3s1",
+		"1.33": "1.33.13+k3s2",
 	}
 
 	KindRegistries = map[string]string{

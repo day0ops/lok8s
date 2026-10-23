@@ -41,6 +41,14 @@ type CiliumManager struct {
 	binaryManager BinaryManagerInterface
 }
 
+// CiliumInstaller is satisfied by *CiliumManager. Callers that only need to
+// install Cilium (not generate manifests or manage binaries) can depend on
+// this instead of the concrete type, so tests can inject a fake that fails on
+// demand.
+type CiliumInstaller interface {
+	InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error
+}
+
 // BinaryManagerInterface defines the interface for binary management
 type BinaryManagerInterface interface {
 	GetBinaryPath() (string, error)
@@ -54,8 +62,16 @@ func NewCiliumManager(helmManager *helm.HelmManager, binaryManager BinaryManager
 	}
 }
 
-// InstallCilium installs Cilium using Helm
-func (cm *CiliumManager) InstallCilium(clusterName string) error {
+// InstallCiliumWithValues installs Cilium using Helm, merging extraValues over
+// the defaults (extraValues may be nil). This lets callers with topologies
+// that need a non-default install - e.g. the native provider, which disables
+// k3s's own kube-proxy in favor of Cilium's kube-proxy replacement - adjust
+// the install without duplicating the repository-add/install/wait sequence.
+func (cm *CiliumManager) InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error {
+	// pin to this cluster's context rather than the kubeconfig's shared,
+	// mutable current-context - see HelmManager.SetContext
+	cm.helmManager.SetContext(clusterName)
+
 	status := logger.NewStatus()
 	status.Start(fmt.Sprintf("installing Cilium on cluster %s", clusterName))
 	defer func() {
@@ -79,6 +95,9 @@ func (cm *CiliumManager) InstallCilium(clusterName string) error {
 		"cni": map[string]interface{}{
 			"exclusive": false,
 		},
+	}
+	for k, v := range extraValues {
+		values[k] = v
 	}
 
 	if err := cm.helmManager.InstallChart("cilium", "cilium/cilium", "kube-system", values, 5*time.Minute); err != nil {
@@ -150,11 +169,15 @@ func (cm *CiliumManager) WaitForCiliumReady(clusterName string) error {
 			}
 		}
 
-		// check operator readiness
+		// check operator readiness - the operator uses leader election for HA,
+		// so at least one ready replica is sufficient for full functionality;
+		// requiring every replica to be ready would hang forever on a
+		// single-node cluster, where pod anti-affinity keeps the second
+		// replica permanently unscheduled
 		operatorReady := false
 		if len(deployments.Items) > 0 {
 			deployment := deployments.Items[0]
-			if deployment.Status.ReadyReplicas > 0 && deployment.Status.ReadyReplicas == *deployment.Spec.Replicas {
+			if deployment.Status.ReadyReplicas > 0 {
 				operatorReady = true
 			}
 		}

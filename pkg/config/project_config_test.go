@@ -449,7 +449,7 @@ invalid: yaml: content: [`
 					Project:              project,
 					Environment:          "minikube",   // Override
 					NumClusters:          3,            // Override
-					NodeCount:            0,            // Zero - should not override
+					NodeCount:            -1,           // Not specified (--nodes not passed) - should not override
 					K8sVersion:           "v1.28.0",    // New field
 					GatewayIP:            "10.100.0.1", // New field
 					SubnetCIDR:           "",           // Empty - should not override
@@ -519,6 +519,45 @@ invalid: yaml: content: [`
 				Expect(mergedConfig.InstallMetalLB).To(Equal(cmdConfig.InstallMetalLB))
 				Expect(mergedConfig.InstallCloudProvider).To(Equal(cmdConfig.InstallCloudProvider))
 				Expect(mergedConfig.SkipMetalLB).To(Equal(cmdConfig.SkipMetalLB))
+			})
+
+			It("should override NodeCount to zero when explicitly requested against an existing saved config", func() {
+				project := "test-project-zero-nodes"
+
+				savedConfig := &ProjectConfig{
+					Project:     project,
+					Environment: "native",
+					NumClusters: 1,
+					NodeCount:   2,
+				}
+				err := cm.SaveConfig(project, savedConfig)
+				Expect(err).NotTo(HaveOccurred())
+
+				// --nodes 0 was explicitly passed: the CLI layer represents this
+				// as NodeCount: 0, distinct from -1 ("not specified")
+				cmdConfig := &ProjectConfig{
+					Project:   project,
+					NodeCount: 0,
+				}
+
+				mergedConfig, err := cm.MergeConfig(project, cmdConfig)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(mergedConfig.NodeCount).To(Equal(0))
+			})
+
+			It("should resolve NodeCount to the package default when not specified and no saved config exists", func() {
+				project := "new-project-default-nodes"
+
+				// --nodes not passed on a brand new project: the CLI layer
+				// represents this as NodeCount: -1
+				cmdConfig := &ProjectConfig{
+					Project:   project,
+					NodeCount: -1,
+				}
+
+				mergedConfig, err := cm.MergeConfig(project, cmdConfig)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(mergedConfig.NodeCount).To(Equal(DefaultNodeCount))
 			})
 		})
 	})

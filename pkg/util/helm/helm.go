@@ -46,6 +46,7 @@ import (
 // HelmManager manages Helm operations
 type HelmManager struct {
 	kubeconfigPath string
+	contextName    string
 	settings       *cli.EnvSettings
 }
 
@@ -59,6 +60,18 @@ func NewHelmManager(kubeconfigPath string) *HelmManager {
 		kubeconfigPath: kubeconfigPath,
 		settings:       settings,
 	}
+}
+
+// SetContext pins subsequent Helm operations and GetKubernetesClient calls to
+// a specific kubeconfig context, instead of the kubeconfig file's shared,
+// mutable current-context. Every cluster lok8s creates shares one
+// kubeconfig file, so relying on current-context is unsafe as soon as more
+// than one cluster exists in it: a second cluster's creation (or a second
+// concurrent lok8s process) can flip current-context out from under an
+// in-flight Helm install, silently pointing it at the wrong cluster.
+func (hm *HelmManager) SetContext(contextName string) {
+	hm.contextName = contextName
+	hm.settings.KubeContext = contextName
 }
 
 // AddRepository adds a Helm repository
@@ -345,18 +358,21 @@ func (hm *HelmManager) getActionConfig(namespace string) (*action.Configuration,
 	actionConfig := new(action.Configuration)
 
 	// Initialize with settings
-	if err := actionConfig.Init(hm.settings.RESTClientGetter(), namespace, "secret", func(format string, v ...interface{}) {
-		logger.Debugf(format, v...)
-	}); err != nil {
+	debugLog := func(format string, v ...interface{}) { logger.Debugf(format, v...) }
+	if err := actionConfig.Init(hm.settings.RESTClientGetter(), namespace, "secret", debugLog); err != nil {
 		return nil, fmt.Errorf("failed to initialize action config: %w", err)
 	}
 
 	return actionConfig, nil
 }
 
-// GetKubernetesClient creates a Kubernetes client
+// GetKubernetesClient creates a Kubernetes client for hm.contextName (or the
+// kubeconfig's current-context if SetContext was never called).
 func (hm *HelmManager) GetKubernetesClient() (*kubernetes.Clientset, error) {
-	config, err := clientcmd.BuildConfigFromFlags("", hm.kubeconfigPath)
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: hm.kubeconfigPath},
+		&clientcmd.ConfigOverrides{CurrentContext: hm.contextName},
+	).ClientConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build config: %w", err)
 	}
@@ -418,9 +434,8 @@ func (hm *HelmManager) TemplateChart(releaseName, chartName, namespace string, v
 	// use a dummy namespace since we're not actually connecting to a cluster
 	actionConfig := new(action.Configuration)
 	dummyNamespace := "default"
-	if err := actionConfig.Init(hm.settings.RESTClientGetter(), dummyNamespace, "memory", func(format string, v ...interface{}) {
-		logger.Debugf(format, v...)
-	}); err != nil {
+	debugLog := func(format string, v ...interface{}) { logger.Debugf(format, v...) }
+	if err := actionConfig.Init(hm.settings.RESTClientGetter(), dummyNamespace, "memory", debugLog); err != nil {
 		// if initialization fails (e.g., no kubeconfig), we can still proceed with templating
 		// by using engine directly
 		logger.Debugf("action config initialization failed (this is OK for templating): %v", err)

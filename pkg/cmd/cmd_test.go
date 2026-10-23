@@ -185,6 +185,23 @@ var _ = Describe("Cmd", func() {
 				Expect(createCommand.MarkFlagRequired("project")).NotTo(HaveOccurred())
 			})
 		})
+
+		Context("NodeCount override resolution", func() {
+			It("should return -1 when --nodes was not explicitly passed", func() {
+				Expect(createCommand.Flags().Changed("nodes")).To(BeFalse())
+				Expect(resolveNodeCountOverride(createCommand)).To(Equal(-1))
+			})
+
+			It("should return 0 when --nodes 0 was explicitly passed", func() {
+				Expect(createCommand.Flags().Set("nodes", "0")).NotTo(HaveOccurred())
+				Expect(resolveNodeCountOverride(createCommand)).To(Equal(0))
+			})
+
+			It("should return the explicit value when --nodes was explicitly passed", func() {
+				Expect(createCommand.Flags().Set("nodes", "5")).NotTo(HaveOccurred())
+				Expect(resolveNodeCountOverride(createCommand)).To(Equal(5))
+			})
+		})
 	})
 
 	Describe("Delete Command", func() {
@@ -199,6 +216,7 @@ var _ = Describe("Cmd", func() {
 				Expect(deleteCommand.Use).To(Equal("delete"))
 				Expect(deleteCommand.Short).To(ContainSubstring("Delete Kubernetes clusters"))
 				Expect(deleteCommand.Long).To(ContainSubstring("Delete one or more Kubernetes clusters"))
+				Expect(deleteCommand.SilenceUsage).To(BeTrue())
 			})
 
 			It("should have all required flags", func() {
@@ -219,6 +237,27 @@ var _ = Describe("Cmd", func() {
 
 			It("should have project flag marked as required", func() {
 				Expect(deleteCommand.MarkFlagRequired("project")).NotTo(HaveOccurred())
+			})
+		})
+	})
+
+	Describe("Image Load Command", func() {
+		var imageLoadCommand *cobra.Command
+
+		BeforeEach(func() {
+			imageLoadCommand = imageLoadCmd()
+		})
+
+		Context("Command structure", func() {
+			It("should have correct basic properties", func() {
+				Expect(imageLoadCommand.Use).To(Equal("image-load"))
+				Expect(imageLoadCommand.Short).To(ContainSubstring("Load Docker images"))
+				Expect(imageLoadCommand.SilenceUsage).To(BeTrue())
+			})
+
+			It("should have project and image flags marked as required", func() {
+				Expect(imageLoadCommand.MarkFlagRequired("project")).NotTo(HaveOccurred())
+				Expect(imageLoadCommand.MarkFlagRequired("image")).NotTo(HaveOccurred())
 			})
 		})
 	})

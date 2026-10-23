@@ -58,7 +58,7 @@ type Manager struct {
 	binaryManager  *BinaryManager
 	helmManager    *helm.HelmManager
 	ciliumManager  *services.CiliumManager
-	metallbManager *services.MetalLBManager
+	metallbManager services.MetalLBInstaller
 }
 
 // CreateOptions contains options for creating minikube clusters
@@ -170,27 +170,9 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
 		}
 
-		if opts.InstallMetalLB {
-			// initialize tracking before first cluster configuration
-			if i == 1 {
-				if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
-					logger.Warnf("failed to initialize MetalLB tracking: %v", err)
-				}
-			}
-
-			if err := m.metallbManager.InstallMetalLB(clusterName); err != nil {
-				logger.Errorf("failed to install MetalLB on %s: %v", clusterName, err)
-			}
-
-			// configure MetalLB after installation
-			var ipAddress string
-			if ipAddress, err = m.getMinikubeIP(clusterName); err != nil {
-				logger.Errorf("failed to get Minikube IP for cluster %s: %v", clusterName, err)
-			} else {
-				if err := m.metallbManager.ConfigureMetalLB(clusterName, ipAddress, i, opts.NumClusters, opts.Project); err != nil {
-					logger.Errorf("failed to configure MetalLB on %s: %v", clusterName, err)
-				}
-			}
+		if err := m.installLoadBalancer(clusterName, i, opts); err != nil {
+			m.cleanupFailedCluster(clusterName)
+			return fmt.Errorf("failed to provision cluster %s: %w", clusterName, err)
 		}
 
 		// enable CSI support
@@ -212,6 +194,58 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	}
 
 	return nil
+}
+
+// installLoadBalancer installs and configures MetalLB if requested. Errors
+// are returned rather than logged-and-ignored so the caller can treat a
+// half-provisioned cluster as a failure instead of reporting success.
+func (m *Manager) installLoadBalancer(clusterName string, clusterIndex int, opts *CreateOptions) error {
+	if !opts.InstallMetalLB {
+		return nil
+	}
+
+	// initialize tracking before first cluster configuration
+	if clusterIndex == 1 {
+		if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
+			logger.Warnf("failed to initialize MetalLB tracking: %v", err)
+		}
+	}
+
+	if err := m.removeExcludeFromLoadBalancersLabel(clusterName); err != nil {
+		logger.Warnf("failed to remove exclude-from-external-load-balancers label: %v", err)
+	}
+
+	if err := m.metallbManager.InstallMetalLBWithValues(clusterName, nil); err != nil {
+		return fmt.Errorf("failed to install MetalLB on %s: %w", clusterName, err)
+	}
+
+	ipAddress, err := m.getMinikubeIP(clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to get Minikube IP for cluster %s: %w", clusterName, err)
+	}
+
+	if err := m.metallbManager.ConfigureMetalLB(clusterName, ipAddress, clusterIndex, opts.NumClusters, opts.Project); err != nil {
+		return fmt.Errorf("failed to configure MetalLB on %s: %w", clusterName, err)
+	}
+
+	return nil
+}
+
+// cleanupFailedCluster deletes a freshly created minikube cluster. Used when
+// a cluster boots successfully but load balancer provisioning fails partway
+// through - leaving it running would otherwise be a half-working cluster
+// masquerading as created. minikube's own delete already tears down its
+// kubeconfig context, unlike kind/native which need a separate call.
+func (m *Manager) cleanupFailedCluster(clusterName string) {
+	binaryPath, err := m.binaryManager.GetBinaryPath()
+	if err != nil {
+		logger.Warnf("failed to get minikube binary path during cleanup: %v", err)
+		return
+	}
+
+	if err := m.deleteCluster(binaryPath, clusterName, false); err != nil {
+		logger.Warnf("failed to delete cluster %s during cleanup: %v", clusterName, err)
+	}
 }
 
 // DeleteClusters deletes multiple minikube clusters
@@ -662,6 +696,14 @@ func (m *Manager) setupNetworkAndDriver(project, bridge, subnetCIDR string) (Net
 	return nil, "", fmt.Errorf("unsupported operating system: %s", config.GetOS())
 }
 
+// minikubeTotalNodes converts lok8s's own NodeCount (worker nodes in
+// addition to the control-plane, matching kind's and native's semantics) to
+// the total node count minikube's own --nodes flag expects, which counts the
+// control-plane as one of the nodes.
+func minikubeTotalNodes(nodeCount int) int {
+	return nodeCount + 1
+}
+
 // createCluster creates a single minikube cluster
 func (m *Manager) createCluster(clusterName, k8sVersion, driver, cpu, memory, disk, networkName, cni, containerRuntime string, nodeCount, clusterIndex int, verbose bool) error {
 	// set environment variable to disable styling
@@ -699,7 +741,7 @@ func (m *Manager) createCluster(clusterName, k8sVersion, driver, cpu, memory, di
 		"--memory=" + memory,
 		"--disk-size=" + disk,
 		"--network=" + networkName,
-		"--nodes=" + strconv.Itoa(nodeCount),
+		"--nodes=" + strconv.Itoa(minikubeTotalNodes(nodeCount)),
 		"--service-cluster-ip-range=" + config.GetMinikubeServiceIPRange(clusterIndex),
 		"--extra-config=kubelet.node-labels=topology.kubernetes.io/region=" + region + ",topology.kubernetes.io/zone=" + zone,
 	}
@@ -814,8 +856,16 @@ type minikubeProfileList struct {
 	Valid []minikubeProfile `json:"valid"`
 }
 
-// ListProfileNames returns the names of all existing minikube profiles
+// ListProfileNames returns the names of all existing minikube profiles. If
+// the minikube binary hasn't been downloaded yet, this reports no profiles
+// rather than downloading several hundred MB just to ask - unlike every
+// other Manager method, this one is also reached by lok8s's unified `list`
+// command, which checks all providers regardless of which one is in use.
 func (m *Manager) ListProfileNames() ([]string, error) {
+	if !m.binaryManager.IsBinaryAvailable() {
+		return nil, nil
+	}
+
 	binaryPath, err := m.binaryManager.GetBinaryPath()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get minikube binary path: %w", err)
@@ -1014,6 +1064,40 @@ func (m *Manager) enableMetricsServer(clusterName string) error {
 	}
 
 	logger.Debugf("✓ successfully enabled metrics-server addon for cluster %s", clusterName)
+	return nil
+}
+
+// removeExcludeFromLoadBalancersLabel removes the
+// node.kubernetes.io/exclude-from-external-load-balancers label that
+// kubeadm (and therefore minikube) applies to the control-plane node by
+// default. MetalLB's speaker DaemonSet refuses to schedule onto any node
+// carrying this label, so on a single-node cluster - just the control-plane -
+// it would otherwise have zero eligible nodes and never become ready,
+// matching the same fix kind's manager already applies to its own
+// control-plane nodes.
+func (m *Manager) removeExcludeFromLoadBalancersLabel(clusterName string) error {
+	clientManager, err := k8s.NewClientManagerForContext(clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to create kubernetes client manager: %w", err)
+	}
+
+	nodes, err := clientManager.GetClientset().CoreV1().Nodes().List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to list nodes: %w", err)
+	}
+
+	for _, node := range nodes.Items {
+		if _, exists := node.Labels["node.kubernetes.io/exclude-from-external-load-balancers"]; !exists {
+			continue
+		}
+
+		delete(node.Labels, "node.kubernetes.io/exclude-from-external-load-balancers")
+		if _, err := clientManager.GetClientset().CoreV1().Nodes().Update(context.Background(), &node, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("failed to update node %s: %w", node.Name, err)
+		}
+		logger.Debugf("removed exclude-from-external-load-balancers label from node: %s", node.Name)
+	}
+
 	return nil
 }
 

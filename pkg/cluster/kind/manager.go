@@ -50,8 +50,8 @@ import (
 type Manager struct {
 	provider             *cluster.Provider
 	helmManager          *helm.HelmManager
-	metallbManager       *services.MetalLBManager
-	ciliumManager        *services.CiliumManager
+	metallbManager       services.MetalLBInstaller
+	ciliumManager        services.CiliumInstaller
 	cloudProviderManager *services.CloudProviderKindManager
 }
 
@@ -89,6 +89,49 @@ type LoadImageOptions struct {
 	Project     string
 	Image       string
 	NumClusters int
+}
+
+// clusterAndContextName returns the kind cluster name and kubeconfig context
+// name for the i-th cluster of a project. Both are project-scoped so that
+// two different projects never collide on the same underlying kind/docker
+// cluster name, matching minikube's existing naming.
+func clusterAndContextName(project string, numClusters, i int) (clusterName, contextName string) {
+	if numClusters == 1 {
+		// if only one cluster, don't add suffix
+		return project, project
+	}
+	name := fmt.Sprintf("%s-%d", project, i)
+	return name, name
+}
+
+// legacyClusterName returns the kind cluster name lok8s used before cluster
+// names were made project-scoped (always "kind1", "kind2", ... regardless of
+// project). It's only used as a fallback when looking up clusters created by
+// an older lok8s version, so status/delete/image-load keep working for them.
+func legacyClusterName(i int) string {
+	return fmt.Sprintf("kind%d", i)
+}
+
+// resolveExistingClusterName returns clusterName if it's already present in
+// existingClusters, otherwise falls back to the legacy pre-project-scoping
+// name if that's what's actually running, so status/delete/image-load keep
+// finding clusters created by an older lok8s version. If neither is found,
+// clusterName (the current scheme) is returned as-is.
+func resolveExistingClusterName(existingClusters []string, clusterName string, i int) string {
+	legacy := legacyClusterName(i)
+	foundLegacy := false
+	for _, c := range existingClusters {
+		if c == clusterName {
+			return clusterName
+		}
+		if c == legacy {
+			foundLegacy = true
+		}
+	}
+	if foundLegacy {
+		return legacy
+	}
+	return clusterName
 }
 
 // getAvailablePortPrefix finds an available port prefix in the 70XX range, if not search for an available port
@@ -138,17 +181,112 @@ func getAvailableRegistryPort() (int, error) {
 	return 0, errors.New("no available ports found above 30000")
 }
 
-// NewManager creates a new kind manager
+// NewManager creates a new kind manager. provider is left unconfigured -
+// ensureProvider must run before it's used, since which container engine to
+// drive it with is only known once the caller resolves one (see
+// resolveContainerEngine).
 func NewManager() *Manager {
 	k8sConfigPath, _ := k8s.GetKubeConfigPath()
 	helmManager := helm.NewHelmManager(k8sConfigPath)
 	return &Manager{
-		provider:             cluster.NewProvider(),
 		helmManager:          helmManager,
 		metallbManager:       services.NewMetalLBManager(helmManager),
 		ciliumManager:        services.NewCiliumManager(helmManager, nil), // kind doesn't need binary manager
 		cloudProviderManager: services.NewCloudProviderKindManager(),
 	}
+}
+
+// resolveContainerEngine returns preferredEngine if the caller already
+// determined one, or the auto-detected engine otherwise.
+func resolveContainerEngine(preferredEngine string) (string, error) {
+	if preferredEngine != "" {
+		return preferredEngine, nil
+	}
+	return docker.GetContainerRuntime()
+}
+
+// ensureProvider (re)configures the kind SDK's cluster.Provider to use the
+// container engine lok8s has already determined is actually working, rather
+// than relying on the SDK's own auto-detection: cluster.NewProvider() with no
+// options only checks `docker -v` (the client binary printing its own
+// version string), which succeeds even when the Docker daemon itself isn't
+// reachable - so it always prefers a non-functional Docker install over a
+// working Podman one, exactly backwards from what lok8s's own
+// daemon-connectivity-based detection (docker.GetContainerRuntime) already
+// worked out.
+func (m *Manager) ensureProvider(preferredEngine string) error {
+	engine, err := resolveContainerEngine(preferredEngine)
+	if err != nil {
+		return err
+	}
+
+	switch engine {
+	case "podman":
+		m.provider = cluster.NewProvider(cluster.ProviderWithPodman())
+	case "docker":
+		m.provider = cluster.NewProvider(cluster.ProviderWithDocker())
+	default:
+		return fmt.Errorf("unsupported container engine: %s", engine)
+	}
+	return nil
+}
+
+// ciliumRequiresRootfulPodman reports whether the given combination of
+// container engine and CNI choice is one the Linux kernel is guaranteed to
+// break: Cilium's init containers need to mount the bpf filesystem, which the
+// kernel refuses from inside any non-initial user namespace - the namespace
+// every container gets under rootless Podman, regardless of capabilities or
+// --privileged. This holds even with a fully --privileged container; it's a
+// kernel policy, not a missing capability.
+func ciliumRequiresRootfulPodman(containerRuntime, cni string, podmanRootless bool) bool {
+	return containerRuntime == "podman" && cni == "cilium" && podmanRootless
+}
+
+// podmanIsRootless reports whether the local podman installation is running
+// rootless.
+func podmanIsRootless() (bool, error) {
+	cmd := exec.Command("podman", "info", "--format", "{{.Host.Security.Rootless}}")
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to check podman rootless status: %w", err)
+	}
+	return strings.TrimSpace(string(output)) == "true", nil
+}
+
+// checkPodmanCiliumCompatibility fails fast with an actionable error when
+// Cilium is selected under a rootless Podman engine, rather than letting
+// cluster creation hang for minutes on an opaque DaemonSet-not-ready timeout
+// before failing with no clear explanation of why.
+func checkPodmanCiliumCompatibility(containerRuntime, cni string) error {
+	if containerRuntime != "podman" || cni != "cilium" {
+		return nil
+	}
+
+	rootless, err := podmanIsRootless()
+	if err != nil {
+		// best-effort: don't block cluster creation if rootless status can't
+		// be determined, so an unexpected podman CLI change doesn't become a
+		// hard failure for an unrelated reason
+		logger.Debugf("failed to determine podman rootless status: %v", err)
+		return nil
+	}
+
+	if ciliumRequiresRootfulPodman(containerRuntime, cni, rootless) {
+		return fmt.Errorf("cilium cannot run on a rootless Podman installation: its init containers need to mount the bpf filesystem, which the Linux kernel blocks from inside any non-initial user namespace (the namespace every container gets under rootless Podman), regardless of capabilities. Use a rootful Podman machine ('podman machine init --rootful'), Docker, or '--cni kindnet'")
+	}
+
+	return nil
+}
+
+// isSupportedKindCNI reports whether cni is one kind's manager actually knows
+// how to provision: cilium (installed via Helm) or kindnet (kind's own
+// built-in default, left enabled by createKindConfig instead of disabled).
+// flannel and calico pass the generic --cni flag validation shared across
+// all three providers, but kind has no install path for them - unlike
+// native, which rejects anything but cilium outright, kind used to silently
+// accept them and produce a cluster with no pod networking at all.
+func isSupportedKindCNI(cni string) bool {
+	return cni == "cilium" || cni == "kindnet"
 }
 
 // CreateClusters creates multiple kind clusters
@@ -158,6 +296,20 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	// check prerequisites
 	if err := m.checkPrerequisites(opts.PreferredContainerEngine); err != nil {
 		return fmt.Errorf("prerequisites check failed: %w", err)
+	}
+
+	if !isSupportedKindCNI(opts.CNI) {
+		return fmt.Errorf("the kind provider only supports the cilium or kindnet CNI, got: %s", opts.CNI)
+	}
+
+	// opts.PreferredContainerEngine is already resolved and verified running
+	// by checkPrerequisites above
+	if err := m.ensureProvider(opts.PreferredContainerEngine); err != nil {
+		return fmt.Errorf("failed to configure container engine: %w", err)
+	}
+
+	if err := checkPodmanCiliumCompatibility(opts.PreferredContainerEngine, opts.CNI); err != nil {
+		return err
 	}
 
 	// validate load balancer options - MetalLB and cloud-provider-kind cannot coexist
@@ -194,42 +346,15 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 
 	// create clusters
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "kind1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("kind%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
 
 		if err := m.createCluster(clusterName, contextName, kindestNode, opts.NodeCount, i, opts, regPort); err != nil {
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
 		}
 
-		if opts.InstallMetalLB {
-			// initialize tracking before first cluster configuration
-			if i == 1 {
-				if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
-					logger.Warnf("failed to initialize MetalLB tracking: %v", err)
-				}
-			}
-
-			if err := m.metallbManager.InstallMetalLB(contextName); err != nil {
-				logger.Errorf("failed to install MetalLB on %s: %v", contextName, err)
-			} else {
-				// configure MetalLB after installation
-				// get cluster IP for kind (using container runtime inspect)
-				clusterIP, err := m.getKindClusterIP(clusterName)
-				if err != nil {
-					logger.Errorf("failed to get Kind cluster IP for %s: %v", clusterName, err)
-				} else {
-					if err := m.metallbManager.ConfigureMetalLB(contextName, clusterIP, i, opts.NumClusters, opts.Project); err != nil {
-						logger.Errorf("failed to configure MetalLB on %s: %v", contextName, err)
-					}
-				}
-			}
+		if err := m.installLoadBalancer(clusterName, contextName, i, opts); err != nil {
+			m.cleanupFailedCluster(clusterName, contextName)
+			return fmt.Errorf("failed to provision cluster %s: %w", clusterName, err)
 		}
 
 		if opts.InstallCloudProvider {
@@ -238,11 +363,9 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 			}
 		}
 
-		// install cilium after cluster creation (only if cilium CNI is selected)
-		if opts.CNI == "cilium" {
-			if err := m.ciliumManager.InstallCilium(contextName); err != nil {
-				logger.Errorf("failed to install Cilium on %s: %v", contextName, err)
-			}
+		if err := m.installCNI(contextName, opts); err != nil {
+			m.cleanupFailedCluster(clusterName, contextName)
+			return fmt.Errorf("failed to provision cluster %s: %w", clusterName, err)
 		}
 	}
 
@@ -256,20 +379,83 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 	return nil
 }
 
+// installLoadBalancer installs and configures MetalLB if requested. Errors
+// are returned rather than logged-and-ignored so the caller can treat a
+// half-provisioned cluster as a failure instead of reporting success.
+func (m *Manager) installLoadBalancer(clusterName, contextName string, clusterIndex int, opts *CreateOptions) error {
+	if !opts.InstallMetalLB {
+		return nil
+	}
+
+	// initialize tracking before first cluster configuration
+	if clusterIndex == 1 {
+		if err := m.metallbManager.InitializeTracking(opts.Project); err != nil {
+			logger.Warnf("failed to initialize MetalLB tracking: %v", err)
+		}
+	}
+
+	if err := m.metallbManager.InstallMetalLBWithValues(contextName, nil); err != nil {
+		return fmt.Errorf("failed to install MetalLB on %s: %w", contextName, err)
+	}
+
+	// get cluster IP for kind (using container runtime inspect)
+	clusterIP, err := m.getKindClusterIP(clusterName)
+	if err != nil {
+		return fmt.Errorf("failed to get Kind cluster IP for %s: %w", clusterName, err)
+	}
+
+	if err := m.metallbManager.ConfigureMetalLB(contextName, clusterIP, clusterIndex, opts.NumClusters, opts.Project); err != nil {
+		return fmt.Errorf("failed to configure MetalLB on %s: %w", contextName, err)
+	}
+
+	return nil
+}
+
+// installCNI installs Cilium if selected as the CNI plugin. kindnet (the
+// only other CNI CreateClusters allows through, see isSupportedKindCNI) needs
+// no separate install step - createKindConfig already leaves it enabled.
+// Errors are returned rather than logged-and-ignored so the caller can treat
+// a half-provisioned cluster as a failure instead of reporting success.
+func (m *Manager) installCNI(contextName string, opts *CreateOptions) error {
+	if opts.CNI != "cilium" {
+		return nil
+	}
+
+	if err := m.ciliumManager.InstallCiliumWithValues(contextName, nil); err != nil {
+		return fmt.Errorf("failed to install Cilium on %s: %w", contextName, err)
+	}
+
+	return nil
+}
+
+// cleanupFailedCluster deletes a freshly created kind cluster and its
+// kubeconfig context. Used when a cluster boots successfully but CNI or load
+// balancer provisioning fails partway through - leaving it running would
+// otherwise be a half-working cluster masquerading as created.
+func (m *Manager) cleanupFailedCluster(clusterName, contextName string) {
+	if err := m.cloudProviderManager.Terminate(contextName, false); err != nil {
+		logger.Warnf("failed to terminate cloud-provider-kind process for context %s during cleanup: %v", contextName, err)
+	}
+	if err := m.provider.Delete(clusterName, ""); err != nil {
+		logger.Warnf("failed to delete cluster %s during cleanup: %v", clusterName, err)
+	}
+	if err := k8s.DeleteContext(contextName); err != nil {
+		logger.Warnf("failed to delete context %s during cleanup: %v", contextName, err)
+	}
+}
+
 // DeleteClusters deletes multiple kind clusters
 func (m *Manager) DeleteClusters(opts *DeleteOptions) error {
 	logger.Infof("-----> 🚨 deleting %d Kind cluster(s) for project %s <-----", opts.NumClusters, opts.Project)
 
+	existingClusters, err := m.ListClusterNames()
+	if err != nil {
+		logger.Debugf("failed to list existing kind clusters (non-fatal): %v", err)
+	}
+
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "kind1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("kind%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
+		clusterName = resolveExistingClusterName(existingClusters, clusterName, i)
 
 		status := logger.NewStatus()
 		status.Start(fmt.Sprintf("deleting Kind cluster %s", clusterName))
@@ -346,15 +532,8 @@ func (m *Manager) printClusterStatusTable(opts *StatusOptions) error {
 	var statuses []clusterStatus
 
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName, contextName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "kind1"
-			contextName = opts.Project
-		} else {
-			clusterName = fmt.Sprintf("kind%d", i)
-			contextName = fmt.Sprintf("%s-%d", opts.Project, i)
-		}
+		clusterName, contextName := clusterAndContextName(opts.Project, opts.NumClusters, i)
+		clusterName = resolveExistingClusterName(existingClusters, clusterName, i)
 
 		// check if cluster exists
 		if !clusterMap[clusterName] {
@@ -427,8 +606,17 @@ func (m *Manager) printClusterStatusTable(opts *StatusOptions) error {
 	return nil
 }
 
-// ListClusterNames returns the names of all existing Kind clusters using the SDK
+// ListClusterNames returns the names of all existing Kind clusters using the
+// SDK. Every other method that needs the provider (DeleteClusters,
+// StatusClusters, LoadImage) reaches it through here first, so configuring
+// the provider in this one place is enough to cover them all - this is also
+// the only entry point reached directly from lok8s's unified `list` command,
+// which has no engine preference to pass in at all.
 func (m *Manager) ListClusterNames() ([]string, error) {
+	if err := m.ensureProvider(""); err != nil {
+		return nil, fmt.Errorf("failed to configure container engine: %w", err)
+	}
+
 	// docker/podman exits 0 with an empty result when there are genuinely no
 	// clusters, so any error here reflects a real problem (e.g. the container
 	// runtime not running) and must not be swallowed as "no clusters".
@@ -459,19 +647,14 @@ func (m *Manager) LoadImage(opts *LoadImageOptions) error {
 	}
 
 	for i := 1; i <= opts.NumClusters; i++ {
-		var clusterName string
-		if opts.NumClusters == 1 {
-			// if only one cluster, don't add suffix
-			clusterName = "kind1"
-		} else {
-			clusterName = fmt.Sprintf("kind%d", i)
-		}
+		clusterName, _ := clusterAndContextName(opts.Project, opts.NumClusters, i)
 
 		// verify cluster exists using SDK
 		existingClusters, err := m.ListClusterNames()
 		if err != nil {
 			return fmt.Errorf("failed to list kind clusters: %w", err)
 		}
+		clusterName = resolveExistingClusterName(existingClusters, clusterName, i)
 
 		clusterExists := false
 		for _, existingCluster := range existingClusters {
@@ -647,7 +830,7 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 	}
 
 	// Create temporary config file (needs registry port for containerd config)
-	configPath, err := m.createKindConfig(clusterName, kindestNode, nodeCount, clusterIndex, cpPort, regPort)
+	configPath, err := m.createKindConfig(clusterName, kindestNode, nodeCount, clusterIndex, cpPort, regPort, opts.CNI)
 	if err != nil {
 		return fmt.Errorf("failed to create kind config: %w", err)
 	}
@@ -675,26 +858,29 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 			clusters = []string{}
 		}
 	}
+	// resolve against the legacy pre-project-scoping name too, so a project
+	// created by an older lok8s version is still recognized as existing
+	existingName := resolveExistingClusterName(clusters, clusterName, clusterIndex)
 	if len(clusters) > 0 {
 		for _, existingCluster := range clusters {
-			if existingCluster == clusterName {
+			if existingCluster == existingName {
 				if opts.Recreate {
 					// prompt user for confirmation
-					if !confirmRecreation(clusterName) {
+					if !confirmRecreation(existingName) {
 						return fmt.Errorf("cluster creation cancelled")
 					}
 
-					logger.Infof("deleting existing cluster %s", clusterName)
-					if err := m.provider.Delete(clusterName, ""); err != nil {
-						logger.Warnf("failed to delete existing cluster %s: %v", clusterName, err)
+					logger.Infof("deleting existing cluster %s", existingName)
+					if err := m.provider.Delete(existingName, ""); err != nil {
+						logger.Warnf("failed to delete existing cluster %s: %v", existingName, err)
 						// continue anyway, the create might still work
 					} else {
-						logger.Infof("successfully deleted existing cluster %s", clusterName)
+						logger.Infof("successfully deleted existing cluster %s", existingName)
 					}
 				} else {
-					logger.Warnf("⚠️ cluster %s already exists", clusterName)
+					logger.Warnf("⚠️ cluster %s already exists", existingName)
 					logger.Warnf("⚠️ use --recreate flag to delete and recreate existing clusters (DESTRUCTIVE !!!)")
-					return fmt.Errorf("cluster %s already exists, use --recreate to overwrite", clusterName)
+					return fmt.Errorf("cluster %s already exists, use --recreate to overwrite", existingName)
 				}
 				break
 			}
@@ -721,7 +907,7 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 	status2.End(true)
 
 	// Update cluster context with correct server URL
-	if err := m.updateClusterContext(clusterIndex, cpPort); err != nil {
+	if err := m.updateClusterContext(clusterName, cpPort); err != nil {
 		logger.Warnf("failed to update cluster context: %v", err)
 	}
 
@@ -739,24 +925,25 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 }
 
 // updateClusterContext updates the cluster context with the correct server URL
-func (m *Manager) updateClusterContext(clusterIndex int, port string) error {
-	// Format cluster number
-	number := clusterIndex
-	clusterName := fmt.Sprintf("kind-kind%d", number)
+func (m *Manager) updateClusterContext(clusterName, port string) error {
+	// kind's own cluster object in kubeconfig keeps its auto-generated
+	// "kind-<clusterName>" name - only the context itself gets renamed (see
+	// createCluster's RenameContext call above)
+	kindClusterName := fmt.Sprintf("kind-%s", clusterName)
 
 	// Set the cluster server URL using Kubernetes SDK
 	serverURL := fmt.Sprintf("https://%s:%s", "127.0.0.1", port)
-	err := k8s.UpdateClusterServer(clusterName, serverURL, false)
+	err := k8s.UpdateClusterServer(kindClusterName, serverURL, false)
 	if err != nil {
 		return fmt.Errorf("failed to set cluster server URL: %w", err)
 	}
 
-	logger.Debugf("updated cluster context %s with server URL: %s", clusterName, serverURL)
+	logger.Debugf("updated cluster context %s with server URL: %s", kindClusterName, serverURL)
 	return nil
 }
 
 // createKindConfig creates a kind cluster configuration file
-func (m *Manager) createKindConfig(clusterName, kindestNode string, nodeCount, clusterIndex int, cpPort string, regPort int) (string, error) {
+func (m *Manager) createKindConfig(clusterName, kindestNode string, nodeCount, clusterIndex int, cpPort string, regPort int, cni string) (string, error) {
 	region := getRegion(clusterIndex - 1)
 	zone := getZone(clusterIndex - 1)
 
@@ -795,10 +982,14 @@ nodes:
 `, kindestNode)
 	}
 
-	// Add advanced network configuration
-	clusterConfig += `networking:
-  disableDefaultCNI: true
-  serviceSubnet: "10.255.100.0/24"
+	// Add advanced network configuration. kindnet is kind's own built-in
+	// default CNI, so the only way to actually use it is to leave it enabled
+	// rather than disabling it like every other (externally installed) CNI.
+	clusterConfig += "networking:\n"
+	if cni != "kindnet" {
+		clusterConfig += "  disableDefaultCNI: true\n"
+	}
+	clusterConfig += `  serviceSubnet: "10.255.100.0/24"
   podSubnet: "10.100.0.0/16"
 `
 
