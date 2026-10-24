@@ -95,3 +95,47 @@ func subnetOverlapsAny(candidate *net.IPNet, subnetCIDRs map[string]string) bool
 	}
 	return false
 }
+
+// gatewayFromSubnet returns the gateway address (network address + 1) and
+// prefix length for a subnet CIDR, matching kind's own
+// generateGatewayIPFromSubnet - Incus's ipv4.address config key and Lima's
+// network create --gateway flag both want a gateway/prefix pair, not a bare
+// network CIDR.
+func gatewayFromSubnet(subnetCIDR string) (net.IP, int, error) {
+	_, ipNet, err := net.ParseCIDR(subnetCIDR)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to parse subnet %s: %w", subnetCIDR, err)
+	}
+
+	ip := ipNet.IP.To4()
+	if ip == nil {
+		return nil, 0, fmt.Errorf("subnet %s is not a valid IPv4 CIDR", subnetCIDR)
+	}
+
+	gateway := make(net.IP, len(ip))
+	copy(gateway, ip)
+	gateway[len(gateway)-1]++
+
+	prefix, _ := ipNet.Mask.Size()
+	return gateway, prefix, nil
+}
+
+// cidrFromGatewayNetmask converts a gateway IP and dotted-decimal netmask
+// (the form `limactl network list --json` reports) back into a network
+// CIDR, the inverse of gatewayFromSubnet.
+func cidrFromGatewayNetmask(gateway, netmask string) (string, error) {
+	gwIP := net.ParseIP(gateway).To4()
+	if gwIP == nil {
+		return "", fmt.Errorf("invalid gateway IP: %s", gateway)
+	}
+
+	maskIP := net.ParseIP(netmask).To4()
+	if maskIP == nil {
+		return "", fmt.Errorf("invalid netmask: %s", netmask)
+	}
+	mask := net.IPMask(maskIP)
+	prefix, _ := mask.Size()
+
+	network := gwIP.Mask(mask)
+	return fmt.Sprintf("%s/%d", network, prefix), nil
+}
