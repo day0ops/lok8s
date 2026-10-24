@@ -359,7 +359,8 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 
 		if opts.InstallCloudProvider {
 			if err := m.cloudProviderManager.Install(contextName, false); err != nil {
-				logger.Errorf("failed to install cloud-provider-kind on %s: %v", contextName, err)
+				m.cleanupFailedCluster(clusterName, contextName)
+				return fmt.Errorf("failed to install cloud-provider-kind on %s: %w", contextName, err)
 			}
 		}
 
@@ -908,7 +909,7 @@ func (m *Manager) createCluster(clusterName, contextName, kindestNode string, no
 
 	// Update cluster context with correct server URL
 	if err := m.updateClusterContext(clusterName, cpPort); err != nil {
-		logger.Warnf("failed to update cluster context: %v", err)
+		return fmt.Errorf("failed to update cluster context: %w", err)
 	}
 
 	// remove exclude-from-external-load-balancers label from control plane nodes

@@ -177,12 +177,14 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 
 		// enable CSI support
 		if err := m.enableCSI(clusterName); err != nil {
-			logger.Errorf("failed to enable CSI on %s: %v", clusterName, err)
+			m.cleanupFailedCluster(clusterName)
+			return fmt.Errorf("failed to enable CSI on %s: %w", clusterName, err)
 		}
 
 		// enable metrics-server addon
 		if err := m.enableMetricsServer(clusterName); err != nil {
-			logger.Errorf("failed to enable metrics-server on %s: %v", clusterName, err)
+			m.cleanupFailedCluster(clusterName)
+			return fmt.Errorf("failed to enable metrics-server on %s: %w", clusterName, err)
 		}
 	}
 
