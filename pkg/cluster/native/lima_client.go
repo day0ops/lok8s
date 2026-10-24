@@ -55,9 +55,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -510,17 +512,17 @@ func (c *LimaClient) NetworkExists(name string) (bool, error) {
 // network already existed; ensureLimaSudoers checks first and is a no-op
 // (no sudo prompt) when already current.
 func (c *LimaClient) CreateNetwork(name, subnetCIDR string) error {
+	gateway, prefix, err := gatewayFromSubnet(subnetCIDR)
+	if err != nil {
+		return fmt.Errorf("failed to derive gateway for subnet %s: %w", subnetCIDR, err)
+	}
+
 	exists, err := c.NetworkExists(name)
 	if err != nil {
 		return fmt.Errorf("failed to check for existing network %s: %w", name, err)
 	}
 
 	if !exists {
-		gateway, prefix, err := gatewayFromSubnet(subnetCIDR)
-		if err != nil {
-			return fmt.Errorf("failed to derive gateway for subnet %s: %w", subnetCIDR, err)
-		}
-
 		cmd := exec.Command(limactlBinary, "network", "create", name,
 			"--mode", config.NativeLimaNetworkMode,
 			"--gateway", fmt.Sprintf("%s/%d", gateway, prefix))
@@ -536,8 +538,102 @@ func (c *LimaClient) CreateNetwork(name, subnetCIDR string) error {
 		logger.Debugf("network %s already exists", name)
 	}
 
+	if err := ensureNetworkDHCPEnd(name, gateway); err != nil {
+		return fmt.Errorf("failed to ensure DHCP range for network %s: %w", name, err)
+	}
+
 	if err := ensureLimaSudoers(); err != nil {
 		return fmt.Errorf("failed to refresh lima sudoers for network %s: %w", name, err)
+	}
+
+	return nil
+}
+
+// patchNetworkDHCPEnd adds a dhcpEnd field to a named network entry within
+// Lima's networks.yaml content, if one isn't already present, preserving
+// everything else in the document (including comments) via yaml.Node-based
+// editing rather than a full struct round-trip. Returns the input unchanged
+// if the field already exists.
+//
+// This works around a limactl bug (confirmed as of 2.2.1): `limactl network
+// create` never sets dhcpEnd, and nothing in limactl's own runtime path
+// fills in the "same as gateway, last byte 254" default its own struct doc
+// comment promises - without it, socket_vmnet is launched with a literal
+// "--vmnet-dhcp-end=<nil>" and never serves any DHCP lease, so no node ever
+// gets an IP on the network.
+func patchNetworkDHCPEnd(networksYAML []byte, name string, gateway net.IP) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(networksYAML, &doc); err != nil {
+		return nil, fmt.Errorf("failed to parse networks.yaml: %w", err)
+	}
+	if len(doc.Content) == 0 {
+		return nil, fmt.Errorf("networks.yaml is empty or malformed")
+	}
+
+	root := doc.Content[0]
+	networksNode := findMapValue(root, "networks")
+	if networksNode == nil {
+		return nil, fmt.Errorf("no top-level 'networks' key found in networks.yaml")
+	}
+
+	entryNode := findMapValue(networksNode, name)
+	if entryNode == nil {
+		return nil, fmt.Errorf("no network entry %q found in networks.yaml", name)
+	}
+
+	if findMapValue(entryNode, "dhcpEnd") != nil {
+		return networksYAML, nil
+	}
+
+	dhcpEnd := make(net.IP, len(gateway))
+	copy(dhcpEnd, gateway)
+	dhcpEnd[len(dhcpEnd)-1] = 254
+
+	entryNode.Content = append(entryNode.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Value: "dhcpEnd"},
+		&yaml.Node{Kind: yaml.ScalarNode, Value: dhcpEnd.String()},
+	)
+
+	return yaml.Marshal(&doc)
+}
+
+// findMapValue returns the value node for key within a YAML mapping node, or
+// nil if the key isn't present. A YAML mapping node stores alternating
+// key/value scalars in Content, not a Go map, so this is a linear scan.
+func findMapValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// ensureNetworkDHCPEnd reads, patches (if needed), and writes back Lima's
+// own ~/.lima/_config/networks.yaml for the named network. See
+// patchNetworkDHCPEnd for why this is needed.
+func ensureNetworkDHCPEnd(name string, gateway net.IP) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to determine home directory: %w", err)
+	}
+	path := filepath.Join(home, ".lima", "_config", "networks.yaml")
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	patched, err := patchNetworkDHCPEnd(data, name, gateway)
+	if err != nil {
+		return err
+	}
+
+	if err := os.WriteFile(path, patched, 0o644); err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
 	}
 
 	return nil

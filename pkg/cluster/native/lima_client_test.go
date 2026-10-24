@@ -1,6 +1,8 @@
 package native
 
 import (
+	"net"
+
 	"github.com/day0ops/lok8s/pkg/config"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -102,6 +104,67 @@ var _ = Describe("parseLimaInstanceListJSON", func() {
 			{Name: "proj-control-plane", Status: "Running"},
 			{Name: "proj-worker-1", Status: "Stopped"},
 		}))
+	})
+})
+
+var _ = Describe("patchNetworkDHCPEnd", func() {
+	const sampleNetworksYAML = `# This file is auto-generated.
+# Comments must survive edits made by lok8s.
+networks:
+  lok8s-proj:
+    mode: shared
+    gateway: 10.89.0.1
+    netmask: 255.255.0.0
+    interface: lok8s0
+  other-net:
+    mode: shared
+    gateway: 192.168.105.1
+    netmask: 255.255.255.0
+    interface: other0
+`
+
+	It("adds dhcpEnd to the named entry when it's missing", func() {
+		patched, err := patchNetworkDHCPEnd([]byte(sampleNetworksYAML), "lok8s-proj", net.ParseIP("10.89.0.1"))
+
+		Expect(err).NotTo(HaveOccurred())
+
+		var doc struct {
+			Networks map[string]struct {
+				Gateway string `yaml:"gateway"`
+				DHCPEnd string `yaml:"dhcpEnd"`
+			} `yaml:"networks"`
+		}
+		Expect(yaml.Unmarshal(patched, &doc)).To(Succeed())
+
+		Expect(doc.Networks["lok8s-proj"].DHCPEnd).To(Equal("10.89.0.254"))
+		Expect(doc.Networks["other-net"].DHCPEnd).To(BeEmpty())
+	})
+
+	It("preserves comments in the document", func() {
+		patched, err := patchNetworkDHCPEnd([]byte(sampleNetworksYAML), "lok8s-proj", net.ParseIP("10.89.0.1"))
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(patched)).To(ContainSubstring("# Comments must survive edits made by lok8s."))
+	})
+
+	It("is a no-op when dhcpEnd is already present", func() {
+		withDHCPEnd := `networks:
+  lok8s-proj:
+    mode: shared
+    gateway: 10.89.0.1
+    netmask: 255.255.0.0
+    dhcpEnd: 10.89.0.200
+`
+		patched, err := patchNetworkDHCPEnd([]byte(withDHCPEnd), "lok8s-proj", net.ParseIP("10.89.0.1"))
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(string(patched)).To(Equal(withDHCPEnd))
+	})
+
+	It("errors when the named network entry doesn't exist", func() {
+		_, err := patchNetworkDHCPEnd([]byte(sampleNetworksYAML), "missing-net", net.ParseIP("10.89.0.1"))
+
+		Expect(err).To(HaveOccurred())
 	})
 })
 
