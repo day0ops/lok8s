@@ -87,6 +87,31 @@ const (
 	// reused as-is since a bare number is valid for both platforms.
 	NativeLinuxMemory = "2GiB"
 
+	// Native on Lima defaults. Lima runs identically on macOS and Linux via
+	// the same limactl CLI, unlike the OS-specific container/incus backends.
+	// NativeLimaMinSupportedVersion is the version floor Lima's own
+	// templates/ubuntu-24.04.yaml template declares as its minimum.
+	NativeLimaMinSupportedVersion = "2.0.0"
+	// NativeLimaNetworkMode is always "shared": the one Lima network mode
+	// that gives every node a routable IP on a project-wide subnet, backed
+	// by socket_vmnet on macOS and Lima's bundled privileged-network helper
+	// on Linux.
+	NativeLimaNetworkMode = "shared"
+	// NativeLimaNetworkInterface is the guest interface name requested for
+	// the project network, so IPv4Address can reliably query it by name
+	// instead of guessing which interface the guest assigned it.
+	NativeLimaNetworkInterface = "lima0"
+	// NativeLimaMemory uses Lima's own size-string syntax (same syntax as
+	// Incus's NativeLinuxMemory); NativeCPU above is reused as-is since a
+	// bare number is valid for Lima's integer `cpus:` field too.
+	NativeLimaMemory = "2GiB"
+	// NativeLimaBaseImageAMD64/ARM64 pin a stable, non-dated Ubuntu 24.04
+	// "release" cloud image URL (Canonical keeps the content behind it
+	// current), not a specific dated/digest-pinned snapshot - the same
+	// "rolling alias, not a hash" choice NativeLinuxBaseImage already makes.
+	NativeLimaBaseImageAMD64 = "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"
+	NativeLimaBaseImageARM64 = "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img"
+
 	// LibVirt network template
 	NetworkTemplate = `
 <network>
