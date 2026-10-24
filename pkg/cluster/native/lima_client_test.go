@@ -40,6 +40,11 @@ var _ = Describe("buildLimaYAML", func() {
 		Expect(parsed.Networks).To(ConsistOf(
 			limaNetworkSpec{Lima: "lok8s-testproj", Interface: config.NativeLimaNetworkInterface},
 		))
+
+		Expect(parsed.Containerd.System).NotTo(BeNil())
+		Expect(*parsed.Containerd.System).To(BeFalse())
+		Expect(parsed.Containerd.User).NotTo(BeNil())
+		Expect(*parsed.Containerd.User).To(BeFalse())
 	})
 })
 

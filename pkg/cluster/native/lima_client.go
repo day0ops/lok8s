@@ -335,15 +335,29 @@ type limaNetworkSpec struct {
 	Interface string `yaml:"interface"`
 }
 
+// limaContainerdSpec mirrors a Lima template's `containerd` section. Both
+// fields must be explicit *bool (not plain bool): YAML's omitempty would
+// otherwise silently drop an explicit "false", since that's indistinguishable
+// from the Go zero value.
+type limaContainerdSpec struct {
+	System *bool `yaml:"system,omitempty"`
+	User   *bool `yaml:"user,omitempty"`
+}
+
 // limaTemplateSpec is the minimal subset of Lima's VM template schema this
 // backend generates - everything else (ssh, mounts, provisioning) is left
 // to Lima's own built-in defaults.
 type limaTemplateSpec struct {
-	Images   []limaImageSpec   `yaml:"images"`
-	CPUs     int               `yaml:"cpus"`
-	Memory   string            `yaml:"memory"`
-	Networks []limaNetworkSpec `yaml:"networks"`
+	Images     []limaImageSpec    `yaml:"images"`
+	CPUs       int                `yaml:"cpus"`
+	Memory     string             `yaml:"memory"`
+	Networks   []limaNetworkSpec  `yaml:"networks"`
+	Containerd limaContainerdSpec `yaml:"containerd"`
 }
+
+// limaBoolPtr returns a pointer to b, needed since Go doesn't allow taking
+// the address of a literal directly.
+func limaBoolPtr(b bool) *bool { return &b }
 
 // buildLimaYAML generates a per-node Lima template joining networkName,
 // pinning both the amd64 and arm64 Ubuntu base images (Lima selects the one
@@ -363,6 +377,14 @@ func buildLimaYAML(networkName string) (string, error) {
 		Memory: config.NativeLimaMemory,
 		Networks: []limaNetworkSpec{
 			{Lima: networkName, Interface: config.NativeLimaNetworkInterface},
+		},
+		// lok8s has no use for Lima's own containerd/nerdctl: k3s (installed
+		// separately right after boot) brings and manages its own embedded
+		// containerd, so this avoids an unnecessary nerdctl download and
+		// GitHub dependency during every VM boot.
+		Containerd: limaContainerdSpec{
+			System: limaBoolPtr(false),
+			User:   limaBoolPtr(false),
 		},
 	}
 
