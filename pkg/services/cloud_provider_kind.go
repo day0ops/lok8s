@@ -37,9 +37,11 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/day0ops/lok8s/pkg/config"
 	"github.com/day0ops/lok8s/pkg/logger"
+	"github.com/day0ops/lok8s/pkg/util/docker"
 	"github.com/day0ops/lok8s/pkg/util/github"
 	"github.com/day0ops/lok8s/pkg/util/k8s"
 )
@@ -355,7 +357,7 @@ func (cpkm *CloudProviderKindManager) startProcess(binaryPath, contextName, temp
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	cmd := exec.Command(binaryPath, "-enable-lb-port-mapping", "-enable-log-dumping", "-logs-dir", logDir)
+	cmd := exec.Command(binaryPath, "--enable-lb-port-mapping", "--enable-log-dumping", "--logs-dir", logDir)
 
 	// set environment variables
 	path, err := k8s.GetKubeConfigPath()
@@ -363,6 +365,21 @@ func (cpkm *CloudProviderKindManager) startProcess(binaryPath, contextName, temp
 		return err
 	}
 	cmd.Env = append(os.Environ(), fmt.Sprintf("KUBECONFIG=%s", path))
+
+	// cloud-provider-kind uses the standard Docker SDK, which needs a real
+	// DOCKER_HOST. Podman machine's connections are SSH tunnels the podman
+	// CLI knows how to use but the Docker SDK can't, and podman machine's
+	// own local socket (what the Docker SDK needs instead) isn't guaranteed
+	// to match whatever DOCKER_HOST (if any) happens to be in our own
+	// environment - so resolve it explicitly rather than relying on
+	// inheritance.
+	if runtime, err := docker.GetContainerRuntime(); err == nil && runtime == "podman" && config.IsDarwin() {
+		if dockerHost, err := resolvePodmanMachineDockerHost(); err != nil {
+			logger.Warnf("failed to resolve podman machine socket for DOCKER_HOST: %v", err)
+		} else {
+			cmd.Env = append(cmd.Env, fmt.Sprintf("DOCKER_HOST=%s", dockerHost))
+		}
+	}
 
 	// redirect stdout and stderr to /dev/null to avoid zombie processes
 	//cmd.Stderr = os.Stderr
@@ -391,9 +408,15 @@ func (cpkm *CloudProviderKindManager) startProcess(binaryPath, contextName, temp
 		logger.Warnf("failed to add process to cache: %v", err)
 	}
 
-	// verify process is actually running
+	// a successful fork only means the OS started the process, not that it
+	// kept running - e.g. a bad flag makes it exit immediately. Give it a
+	// moment to fail fast, then actually check it's still alive.
+	time.Sleep(500 * time.Millisecond)
 	if err := cpkm.verifyProcessRunning(cmd.Process.Pid); err != nil {
-		logger.Warnf("process verification failed: %v", err)
+		if termErr := cpkm.processCache.terminateProcess(contextName); termErr != nil {
+			logger.Warnf("failed to clean up dead process entry: %v", termErr)
+		}
+		return fmt.Errorf("cloud-provider-kind exited immediately after starting, check logs in %s: %w", logDir, err)
 	}
 
 	logger.Infof("✓ started cloud-provider-kind process (PID: %d) for context %s", cmd.Process.Pid, contextName)
@@ -401,10 +424,63 @@ func (cpkm *CloudProviderKindManager) startProcess(binaryPath, contextName, temp
 	return nil
 }
 
-// verifyProcessRunning checks if a process is actually running
-func (cpkm *CloudProviderKindManager) verifyProcessRunning(pid int) error {
-	_, err := os.FindProcess(pid)
+// podmanMachineCommand builds a `podman machine ...` command. podman
+// refuses to run "machine" subcommands as root ("cannot run command as
+// root"), but we're root here when launched via sudo on macOS - so run as
+// the invoking user instead, via the SUDO_USER sudo itself always sets.
+func podmanMachineCommand(args ...string) *exec.Cmd {
+	if os.Geteuid() == 0 {
+		if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+			return exec.Command("sudo", append([]string{"-u", sudoUser, "podman"}, args...)...)
+		}
+	}
+	return exec.Command("podman", args...)
+}
+
+// resolvePodmanMachineDockerHost returns a DOCKER_HOST value pointing at the
+// currently running podman machine's local API socket.
+func resolvePodmanMachineDockerHost() (string, error) {
+	out, err := podmanMachineCommand("machine", "list", "--format", "json").Output()
 	if err != nil {
+		return "", fmt.Errorf("failed to list podman machines: %w", err)
+	}
+
+	var machines []struct {
+		Name    string `json:"Name"`
+		Running bool   `json:"Running"`
+	}
+	if err := json.Unmarshal(out, &machines); err != nil {
+		return "", fmt.Errorf("failed to parse podman machine list: %w", err)
+	}
+
+	var activeMachine string
+	for _, m := range machines {
+		if m.Running {
+			activeMachine = m.Name
+			break
+		}
+	}
+	if activeMachine == "" {
+		return "", fmt.Errorf("no running podman machine found")
+	}
+
+	out, err = podmanMachineCommand("machine", "inspect", activeMachine, "--format", "{{.ConnectionInfo.PodmanSocket.Path}}").Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to inspect podman machine %s: %w", activeMachine, err)
+	}
+
+	return "unix://" + strings.TrimSpace(string(out)), nil
+}
+
+// verifyProcessRunning checks whether pid is still alive via signal 0.
+// os.FindProcess alone can't tell us this: on POSIX it always succeeds
+// regardless of whether the process actually exists.
+func (cpkm *CloudProviderKindManager) verifyProcessRunning(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("process %d not found: %w", pid, err)
+	}
+	if err := process.Signal(syscall.Signal(0)); err != nil {
 		return fmt.Errorf("process %d is not running: %w", pid, err)
 	}
 	logger.Debugf("verified process %d is running", pid)
