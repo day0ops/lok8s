@@ -93,6 +93,13 @@ func newLimaClient() (NodeClient, error) {
 // installed - it ships as a full bin/libexec/share package tree meant to be
 // installed like Homebrew, not a single binary, so auto-installing it risks
 // colliding with a Lima a user already has.
+//
+// Lima sudoers setup is NOT done here - it's deferred to CreateNetwork.
+// `limactl sudoers` output reflects the current contents of
+// ~/.lima/_config/networks.yaml, and creating this project's network after
+// this point would change that file and make a sudoers file written here
+// stale, causing `limactl start` to refuse to boot with a fatal
+// "sudoers file ... is out of sync" error.
 func (c *LimaClient) CheckPrerequisites() error {
 	installedVersion, err := c.Version()
 	if err != nil {
@@ -108,10 +115,6 @@ func (c *LimaClient) CheckPrerequisites() error {
 		if err := ensureSocketVMNet(); err != nil {
 			return fmt.Errorf("failed to ensure socket_vmnet is installed: %w", err)
 		}
-	}
-
-	if err := ensureLimaSudoers(); err != nil {
-		return fmt.Errorf("failed to configure lima sudoers: %w", err)
 	}
 
 	return nil
@@ -475,32 +478,46 @@ func (c *LimaClient) NetworkExists(name string) (bool, error) {
 
 // CreateNetwork creates a lima network in "shared" mode with the given
 // subnet CIDR. It is a no-op if the network already exists.
+//
+// Lima sudoers setup (see CheckPrerequisites) is refreshed unconditionally
+// at the end of this function, after the network is known to exist, whether
+// it was just created or already present. `limactl sudoers` output reflects
+// the current contents of ~/.lima/_config/networks.yaml, so any network
+// create here can make a previously-written sudoers file stale, and a retry
+// after a partial failure could hit the same staleness even when the
+// network already existed; ensureLimaSudoers checks first and is a no-op
+// (no sudo prompt) when already current.
 func (c *LimaClient) CreateNetwork(name, subnetCIDR string) error {
 	exists, err := c.NetworkExists(name)
 	if err != nil {
 		return fmt.Errorf("failed to check for existing network %s: %w", name, err)
 	}
-	if exists {
-		logger.Debugf("network %s already exists", name)
-		return nil
-	}
 
-	gateway, prefix, err := gatewayFromSubnet(subnetCIDR)
-	if err != nil {
-		return fmt.Errorf("failed to derive gateway for subnet %s: %w", subnetCIDR, err)
-	}
-
-	cmd := exec.Command(limactlBinary, "network", "create", name,
-		"--mode", config.NativeLimaNetworkMode,
-		"--gateway", fmt.Sprintf("%s/%d", gateway, prefix))
-	if output, err := util.RunCommand(cmd); err != nil {
-		if output != "" {
-			return fmt.Errorf("failed to create network %s: %w: %s", name, err, output)
+	if !exists {
+		gateway, prefix, err := gatewayFromSubnet(subnetCIDR)
+		if err != nil {
+			return fmt.Errorf("failed to derive gateway for subnet %s: %w", subnetCIDR, err)
 		}
-		return fmt.Errorf("failed to create network %s: %w", name, err)
+
+		cmd := exec.Command(limactlBinary, "network", "create", name,
+			"--mode", config.NativeLimaNetworkMode,
+			"--gateway", fmt.Sprintf("%s/%d", gateway, prefix))
+		if output, err := util.RunCommand(cmd); err != nil {
+			if output != "" {
+				return fmt.Errorf("failed to create network %s: %w: %s", name, err, output)
+			}
+			return fmt.Errorf("failed to create network %s: %w", name, err)
+		}
+
+		logger.Debugf("created network %s with subnet %s", name, subnetCIDR)
+	} else {
+		logger.Debugf("network %s already exists", name)
 	}
 
-	logger.Debugf("created network %s with subnet %s", name, subnetCIDR)
+	if err := ensureLimaSudoers(); err != nil {
+		return fmt.Errorf("failed to refresh lima sudoers for network %s: %w", name, err)
+	}
+
 	return nil
 }
 
