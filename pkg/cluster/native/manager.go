@@ -204,12 +204,17 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 // which runs on the host network) need it to reach Ready - installing
 // MetalLB first would otherwise hang until its own helm install timeout.
 func (m *Manager) installCNIAndLoadBalancer(contextName, cpIP string, clusterIndex int, opts *CreateOptions) error {
-	// kubeProxyReplacement is required: cross-node pod traffic to a ClusterIP
-	// backed by a host-networked pod (like k3s's own apiserver Service) hangs
-	// on TLS handshakes under kube-proxy's iptables DNAT in this environment.
-	// k3s's own kube-proxy is left running (see controlPlaneArgs) since
-	// Cilium's replacement intercepts ahead of it once up, without leaving a
-	// gap before Cilium itself is ready.
+	// kubeProxyReplacement is disabled: Cilium's eBPF service translation
+	// doesn't take effect for pod-originated traffic to the apiserver's own
+	// ClusterIP in this environment. Traced with `cilium monitor`: the SYN
+	// leaves the node still addressed to the ClusterIP, classified as
+	// external ("->world") traffic, even though `cilium service list` and
+	// `cilium status` both report the service as correctly programmed and
+	// socket-LB as fully enabled - the live datapath doesn't match that
+	// reported state. k3s's own kube-proxy (left running, see
+	// controlPlaneArgs) handles Service routing instead, which was confirmed
+	// by direct repro to work correctly for this same traffic with no other
+	// change.
 	//
 	// bpf.masquerade is required for cross-cluster pod traffic within the
 	// same project: by default Cilium masquerades pod egress via an iptables
@@ -221,13 +226,13 @@ func (m *Manager) installCNIAndLoadBalancer(contextName, cpIP string, clusterInd
 	// network) leaves with its unmasqueraded pod IP as source, which the
 	// sibling node has no route back to, and the connection just hangs.
 	// eBPF-native masquerading bypasses iptables entirely, so it isn't
-	// affected by kube-proxy's resync. Confirmed by direct repro: cross-
-	// cluster pod->node traffic went from 100% packet loss to 0% after
+	// affected by kube-proxy's resync, and it works independently of
+	// kubeProxyReplacement above (confirmed via `cilium status`: masquerade
+	// mode stays BPF regardless of that setting). Confirmed by direct repro:
+	// cross-cluster pod->node traffic went from 100% packet loss to 0% after
 	// enabling this, with no other change.
 	ciliumValues := map[string]interface{}{
-		"kubeProxyReplacement": true,
-		"k8sServiceHost":       cpIP,
-		"k8sServicePort":       k3sAPIPort,
+		"kubeProxyReplacement": false,
 		"bpf": map[string]interface{}{
 			"masquerade": true,
 		},
