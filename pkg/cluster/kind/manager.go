@@ -943,7 +943,20 @@ func (m *Manager) updateClusterContext(clusterName, port string) error {
 	return nil
 }
 
-// createKindConfig creates a kind cluster configuration file
+// createKindConfig creates a kind cluster configuration file.
+//
+// The control-plane's extraPortMappings pins listenAddress to 127.0.0.1
+// rather than leaving it at kind's default (0.0.0.0): Podman's port
+// inspection reports the bind address verbatim, and kind's podman provider
+// only maps an *empty* HostIP to 127.0.0.1, not the literal string
+// "0.0.0.0" (sigs.k8s.io/kind pkg/cluster/internal/providers/podman,
+// getHostIPOrDefault). Left unpinned, any client that builds its own
+// kubeconfig from container introspection (e.g. cloud-provider-kind) ends
+// up with a server URL of literally "0.0.0.0:<port>" - which a lenient,
+// cert-skipping probe can reach (the OS routes 0.0.0.0 to localhost) but a
+// real TLS client can't, since kind's apiserver cert has no SAN for
+// "0.0.0.0". Binding to 127.0.0.1 directly avoids the bug instead of
+// depending on it being fixed upstream.
 func (m *Manager) createKindConfig(clusterName, kindestNode string, nodeCount, clusterIndex int, cpPort string, regPort int, cni string) (string, error) {
 	region := getRegion(clusterIndex - 1)
 	zone := getZone(clusterIndex - 1)
@@ -970,6 +983,7 @@ nodes:
     extraPortMappings:
       - containerPort: 6443
         hostPort: %s
+        listenAddress: "127.0.0.1"
     labels:
       ingress-ready: "true"
       topology.kubernetes.io/region: %s
