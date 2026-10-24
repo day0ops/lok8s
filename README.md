@@ -90,7 +90,7 @@ On macOS or Linux, via `--native-vm-backend lima`:
 - A one-time `sudo`-gated `limactl sudoers` setup also runs automatically on first use, on either OS, to grant Lima's network helpers (`socket_vmnet` on macOS, Lima's own bundled helper on Linux) the privileges they need.
 
 > [!WARNING]
-> The Lima backend's Linux networking path is best-effort and has not been verified against a real Linux host - the macOS path has been (see `pkg/cluster/native/lima_client.go`'s header comment).
+> The Lima backend has not yet been verified against a real `limactl` install on either platform. Linux is expected to need the most scrutiny, since its networking setup (a privileged helper distinct from macOS's `socket_vmnet`) is the least exercised path.
 
 ### Download the Binary
 

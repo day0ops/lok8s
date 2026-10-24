@@ -39,6 +39,10 @@
 // whichever of container_client.go (darwin) or incus_client.go (linux) is
 // active for the current build, and this file compiles alongside whichever
 // one that is.
+//
+// IMPORTANT: this file was written against limactl's documented CLI and
+// network/sudoers/boot behavior, not verified against a real Lima install
+// on either macOS or Linux.
 
 package native
 
