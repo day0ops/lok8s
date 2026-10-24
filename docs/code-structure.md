@@ -16,9 +16,10 @@ pkg/
 │   │   └── binary_manager.go
 │   └── native/
 │       ├── manager.go
-│       ├── client.go             # NodeClient interface shared by both backends
+│       ├── client.go             # NodeClient interface + backend-selecting factory
 │       ├── container_client.go   # macOS backend (Apple `container` CLI)
 │       ├── incus_client.go       # Linux backend (Incus)
+│       ├── lima_client.go        # cross-platform backend (Lima, via limactl)
 │       ├── k3s.go
 │       ├── subnet.go
 │       └── kubeconfig_merge.go
@@ -51,4 +52,4 @@ pkg/
     └── retry.go
 ```
 
-Each cluster provider (`kind`, `minikube`, `native`) implements the same shape of `Manager`: `CreateClusters`, `DeleteClusters`, `StatusClusters`, `ListClusterNames`, `LoadImage`. `pkg/services` (Cilium, MetalLB, cloud-provider-kind) and `pkg/util` (Helm, Kubernetes clients, Docker/Podman, GitHub releases) are shared across all three providers.
+Each cluster provider (`kind`, `minikube`, `native`) implements the same shape of `Manager`: `CreateClusters`, `DeleteClusters`, `StatusClusters`, `ListClusterNames`, `LoadImage`. The native provider itself has three selectable VM backends (`container`, `incus`, `lima`), chosen via `--native-vm-backend`. `pkg/services` (Cilium, MetalLB, cloud-provider-kind) and `pkg/util` (Helm, Kubernetes clients, Docker/Podman, GitHub releases) are shared across all three providers.
