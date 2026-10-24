@@ -22,6 +22,15 @@
 
 package network
 
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+
+	"github.com/day0ops/lok8s/pkg/logger"
+)
+
 // Network represents a network configuration
 type Network struct {
 	// The name of the network
@@ -35,4 +44,30 @@ type Network struct {
 
 	// QEMU Connection URI
 	ConnectionURI string
+}
+
+// ValidateSudoAccess validates sudo access by checking if a sudo session is
+// already active, prompting for a password otherwise. Used by any backend
+// that needs a one-time privileged setup step: minikube's vmnet-helper
+// (network_darwin.go) and the native provider's Lima backend
+// (pkg/cluster/native/lima_client.go), on whichever platform each runs on.
+func ValidateSudoAccess(ctx context.Context) error {
+	// first, try to validate sudo without prompting (non-interactive)
+	// this will succeed if sudo session is already active
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "-v")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err == nil {
+		return nil
+	}
+
+	// sudo session is not active, prompt for password
+	logger.Debugf("sudo session not active, prompting for password")
+	cmd = exec.CommandContext(ctx, "sudo", "-v")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("sudo validation failed: %w", err)
+	}
+	return nil
 }
