@@ -42,10 +42,11 @@ import (
 )
 
 var (
-	cfgFile       string
-	verbose       bool
-	environment   string
-	configManager *config.ConfigManager
+	cfgFile         string
+	verbose         bool
+	environment     string
+	nativeVMBackend string
+	configManager   *config.ConfigManager
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -90,6 +91,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (YAML format, can be located anywhere)")
 	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "enable verbose logging")
 	rootCmd.PersistentFlags().StringVarP(&environment, "environment", "e", "minikube", "environment to use (minikube, kind, or native)")
+	rootCmd.PersistentFlags().StringVar(&nativeVMBackend, "native-vm-backend", "", "VM backend for the native provider (Native only, Options: container, incus, lima; default varies by OS)")
 
 	// add subcommands
 	rootCmd.AddCommand(createCmd())
@@ -199,6 +201,7 @@ func createCmd() *cobra.Command {
 				CNI:                  cni,
 				ContainerRuntime:     containerRuntime,
 				ContainerEngine:      containerEngine,
+				NativeVMBackend:      nativeVMBackend,
 				InstallMetalLB:       !skipMetalLB,
 				InstallCloudProvider: installCloudProvider,
 				SkipMetalLB:          skipMetalLB,
@@ -364,12 +367,16 @@ func deleteCmd() *cobra.Command {
 			// use saved config if available, otherwise use defaults
 			env := environment
 			clusters := numClusters
+			backend := nativeVMBackend
 			if savedConfig != nil {
 				if savedConfig.Environment != "" {
 					env = savedConfig.Environment
 				}
 				if savedConfig.NumClusters > 0 {
 					clusters = savedConfig.NumClusters
+				}
+				if savedConfig.NativeVMBackend != "" {
+					backend = savedConfig.NativeVMBackend
 				}
 			}
 
@@ -382,7 +389,7 @@ func deleteCmd() *cobra.Command {
 			} else if env == "kind" {
 				return deleteKindClusters(project, clusters, force)
 			} else if env == "native" {
-				return deleteNativeClusters(project, clusters, force)
+				return deleteNativeClusters(project, clusters, force, backend)
 			}
 			return fmt.Errorf("invalid environment: %s", env)
 		},
@@ -497,9 +504,12 @@ func createNativeClusters(finalConfig *config.ProjectConfig, recreate bool, conf
 		Recreate:       recreate,
 	}
 
-	manager := native.NewManager()
-	err := manager.CreateClusters(opts)
+	manager, err := native.NewManager(finalConfig.NativeVMBackend)
 	if err != nil {
+		return fmt.Errorf("failed to initialize native provider: %w", err)
+	}
+
+	if err := manager.CreateClusters(opts); err != nil {
 		return err
 	}
 
@@ -559,14 +569,17 @@ func deleteKindClusters(project string, numClusters int, force bool) error {
 	return manager.DeleteClusters(opts)
 }
 
-func deleteNativeClusters(project string, numClusters int, force bool) error {
+func deleteNativeClusters(project string, numClusters int, force bool, backend string) error {
 	opts := &native.DeleteOptions{
 		Project:     project,
 		NumClusters: numClusters,
 		Force:       force,
 	}
 
-	manager := native.NewManager()
+	manager, err := native.NewManager(backend)
+	if err != nil {
+		return fmt.Errorf("failed to initialize native provider: %w", err)
+	}
 	return manager.DeleteClusters(opts)
 }
 
@@ -594,12 +607,16 @@ func statusCmd() *cobra.Command {
 			// use saved config if available, otherwise use defaults
 			env := environment
 			clusters := 1
+			backend := nativeVMBackend
 			if savedConfig != nil {
 				if savedConfig.Environment != "" {
 					env = savedConfig.Environment
 				}
 				if savedConfig.NumClusters > 0 {
 					clusters = savedConfig.NumClusters
+				}
+				if savedConfig.NativeVMBackend != "" {
+					backend = savedConfig.NativeVMBackend
 				}
 			}
 
@@ -612,7 +629,7 @@ func statusCmd() *cobra.Command {
 			} else if env == "kind" {
 				return statusKindClusters(project, clusters)
 			} else if env == "native" {
-				return statusNativeClusters(project, clusters)
+				return statusNativeClusters(project, clusters, backend)
 			}
 			return fmt.Errorf("invalid environment: %s", env)
 		},
@@ -647,13 +664,16 @@ func statusKindClusters(project string, numClusters int) error {
 	return manager.StatusClusters(opts)
 }
 
-func statusNativeClusters(project string, numClusters int) error {
+func statusNativeClusters(project string, numClusters int, backend string) error {
 	opts := &native.StatusOptions{
 		Project:     project,
 		NumClusters: numClusters,
 	}
 
-	manager := native.NewManager()
+	manager, err := native.NewManager(backend)
+	if err != nil {
+		return fmt.Errorf("failed to initialize native provider: %w", err)
+	}
 	return manager.StatusClusters(opts)
 }
 
@@ -701,9 +721,23 @@ func listAllProfiles() error {
 		entries = append(entries, profileEntry{provider: "kind", name: name})
 	}
 
-	nativeNames, err := native.NewManager().ListClusterNames()
-	if err != nil {
-		logger.Debugf("native: %v", err)
+	// list native clusters created with this OS's default backend, and
+	// separately with lima - a user can have native projects on either, and
+	// the empty-backend default never resolves to "lima" on any platform, so
+	// trying both covers every backend without duplicate queries
+	var nativeNames []string
+	for _, backend := range []string{"", "lima"} {
+		manager, err := native.NewManager(backend)
+		if err != nil {
+			logger.Debugf("native (backend=%q): %v", backend, err)
+			continue
+		}
+		names, err := manager.ListClusterNames()
+		if err != nil {
+			logger.Debugf("native (backend=%q): %v", backend, err)
+			continue
+		}
+		nativeNames = append(nativeNames, names...)
 	}
 	for _, name := range nativeNames {
 		entries = append(entries, profileEntry{provider: "native", name: name})
@@ -754,12 +788,16 @@ func imageLoadCmd() *cobra.Command {
 			// use saved config if available, otherwise use defaults
 			env := environment
 			clusters := 1
+			backend := nativeVMBackend
 			if savedConfig != nil {
 				if savedConfig.Environment != "" {
 					env = savedConfig.Environment
 				}
 				if savedConfig.NumClusters > 0 {
 					clusters = savedConfig.NumClusters
+				}
+				if savedConfig.NativeVMBackend != "" {
+					backend = savedConfig.NativeVMBackend
 				}
 			}
 
@@ -772,7 +810,7 @@ func imageLoadCmd() *cobra.Command {
 			} else if env == "kind" {
 				return loadImageKind(project, image, clusters)
 			} else if env == "native" {
-				return loadImageNative(project, image, clusters)
+				return loadImageNative(project, image, clusters, backend)
 			}
 			return fmt.Errorf("invalid environment: %s", env)
 		},
@@ -813,14 +851,17 @@ func loadImageKind(project, image string, numClusters int) error {
 	return manager.LoadImage(opts)
 }
 
-func loadImageNative(project, image string, numClusters int) error {
+func loadImageNative(project, image string, numClusters int, backend string) error {
 	opts := &native.LoadImageOptions{
 		Project:     project,
 		Image:       image,
 		NumClusters: numClusters,
 	}
 
-	manager := native.NewManager()
+	manager, err := native.NewManager(backend)
+	if err != nil {
+		return fmt.Errorf("failed to initialize native provider: %w", err)
+	}
 	return manager.LoadImage(opts)
 }
 
