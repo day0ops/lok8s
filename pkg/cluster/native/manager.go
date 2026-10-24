@@ -135,17 +135,17 @@ func (m *Manager) nodeNamesForCluster(clusterName string) ([]string, error) {
 	return matched, nil
 }
 
-// NewManager creates a new native manager
-func NewManager() *Manager {
+// NewManager creates a new native manager using the given VM backend
+// ("container", "incus", "lima", or "" for the platform default - see
+// NewNodeClient).
+func NewManager(backend string) (*Manager, error) {
+	client, err := NewNodeClient(backend)
+	if err != nil {
+		return nil, err
+	}
+
 	k8sConfigPath, _ := k8s.GetKubeConfigPath()
 	helmManager := helm.NewHelmManager(k8sConfigPath)
-
-	// the empty backend always resolves to this platform's own compiled-in
-	// default (container on macOS, incus on Linux), which never errors
-	client, err := NewNodeClient("")
-	if err != nil {
-		panic(fmt.Sprintf("unreachable: default native backend failed to resolve: %v", err))
-	}
 
 	return &Manager{
 		client:        client,
@@ -155,7 +155,7 @@ func NewManager() *Manager {
 		// network (like minikube's VMs), unlike kind's NAT'd Docker network,
 		// so it uses the same bounded octet range minikube does
 		metallbManager: services.NewMetalLBManagerWithOptions(helmManager, config.MetalLBRangeMinLastOctet, config.MetalLBRangeMaxLastOctet),
-	}
+	}, nil
 }
 
 // CreateClusters creates multiple native clusters
