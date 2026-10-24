@@ -540,6 +540,19 @@ func (c *LimaClient) installK3s(nodeName, k8sVersion string, k3sArgs []string) e
 	return nil
 }
 
+// makeRootMountShared marks the node's root mount as shared (rshared)
+// propagation, needed before Cilium's mount-bpf-fs init container runs -
+// same requirement k3s.go's shared makeRootMountShared documents for
+// container/incus, but unlike those two, Lima's Exec connects as a
+// non-root user (see Exec's doc comment), so this needs its own sudo
+// prefix rather than reusing that shared helper directly.
+func (c *LimaClient) makeRootMountShared(nodeName string) error {
+	if _, err := c.Exec(nodeName, "sudo", "mount", "--make-rshared", "/"); err != nil {
+		return fmt.Errorf("failed to mark root mount shared on %s: %w", nodeName, err)
+	}
+	return nil
+}
+
 // BootControlPlane boots a VM and installs+starts a k3s server on it.
 func (c *LimaClient) BootControlPlane(nodeName, network, k8sVersion, token, tlsSAN string) error {
 	if err := c.boot(nodeName, network); err != nil {
@@ -548,7 +561,7 @@ func (c *LimaClient) BootControlPlane(nodeName, network, k8sVersion, token, tlsS
 	if err := c.waitForAgentReady(nodeName, 2*time.Minute); err != nil {
 		return err
 	}
-	if err := makeRootMountShared(c, nodeName); err != nil {
+	if err := c.makeRootMountShared(nodeName); err != nil {
 		return err
 	}
 
@@ -563,7 +576,7 @@ func (c *LimaClient) BootWorker(nodeName, network, k8sVersion, serverURL, token 
 	if err := c.waitForAgentReady(nodeName, 2*time.Minute); err != nil {
 		return err
 	}
-	if err := makeRootMountShared(c, nodeName); err != nil {
+	if err := c.makeRootMountShared(nodeName); err != nil {
 		return err
 	}
 
