@@ -45,18 +45,26 @@ package native
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/day0ops/lok8s/pkg/config"
 	"github.com/day0ops/lok8s/pkg/logger"
+	"github.com/day0ops/lok8s/pkg/network"
 	"github.com/day0ops/lok8s/pkg/util"
+	"github.com/day0ops/lok8s/pkg/util/github"
 	"github.com/day0ops/lok8s/pkg/util/version"
 	"gopkg.in/yaml.v3"
 )
@@ -92,6 +100,16 @@ func (c *LimaClient) CheckPrerequisites() error {
 	}
 	logger.Debugf("using limactl version: %s", installedVersion)
 
+	if runtime.GOOS == "darwin" {
+		if err := ensureSocketVMNet(); err != nil {
+			return fmt.Errorf("failed to ensure socket_vmnet is installed: %w", err)
+		}
+	}
+
+	if err := ensureLimaSudoers(); err != nil {
+		return fmt.Errorf("failed to configure lima sudoers: %w", err)
+	}
+
 	return nil
 }
 
@@ -117,6 +135,183 @@ func parseLimactlVersion(output []byte) (string, error) {
 	}
 
 	return "", fmt.Errorf("unable to parse limactl version from: %s", strings.TrimSpace(string(output)))
+}
+
+const (
+	socketVMNetInstallPath = "/opt/socket_vmnet"
+	socketVMNetBinaryPath  = socketVMNetInstallPath + "/bin/socket_vmnet"
+)
+
+// ensureSocketVMNet ensures socket_vmnet is installed on macOS, downloading
+// and installing it under sudo if missing. This mirrors vmnet-helper's own
+// auto-install flow in pkg/network/network_darwin.go, since Lima's own
+// source code hardcodes /opt/socket_vmnet/bin/socket_vmnet as its expected
+// location - unlike limactl itself, it's designed to be installed exactly
+// this way.
+func ensureSocketVMNet() error {
+	if _, err := os.Stat(socketVMNetBinaryPath); err == nil {
+		return nil
+	}
+
+	logger.Infof("socket_vmnet not found, installing to %s", socketVMNetInstallPath)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	if err := network.ValidateSudoAccess(ctx); err != nil {
+		return fmt.Errorf("sudo access required to install socket_vmnet: %w", err)
+	}
+
+	return installSocketVMNet(ctx)
+}
+
+// installSocketVMNet downloads and installs socket_vmnet to
+// /opt/socket_vmnet, verifying its checksum against the release's combined
+// SHA256SUMS file first (a non-fatal warning on mismatch, matching
+// minikube/binary_manager.go's own checksum-verification tolerance).
+func installSocketVMNet(ctx context.Context) error {
+	latestVersion, err := github.NewGitHubClient().GetLatestVersion("lima-vm", "socket_vmnet")
+	if err != nil {
+		return fmt.Errorf("failed to determine latest socket_vmnet version: %w", err)
+	}
+
+	goarchToReleaseArch := map[string]string{"amd64": "x86_64", "arm64": "arm64"}
+	releaseArch, ok := goarchToReleaseArch[runtime.GOARCH]
+	if !ok {
+		return fmt.Errorf("socket_vmnet has no release for architecture %s", runtime.GOARCH)
+	}
+
+	assetName := fmt.Sprintf("socket_vmnet-%s-%s.tar.gz", latestVersion, releaseArch)
+	downloadURL := fmt.Sprintf("https://github.com/lima-vm/socket_vmnet/releases/download/v%s/%s", latestVersion, assetName)
+	checksumsURL := fmt.Sprintf("https://github.com/lima-vm/socket_vmnet/releases/download/v%s/SHA256SUMS", latestVersion)
+
+	logger.Infof("downloading socket_vmnet from %s", downloadURL)
+
+	tmpFile, err := os.CreateTemp("", "socket_vmnet-*.tar.gz")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary file: %w", err)
+	}
+	defer os.Remove(tmpFile.Name())
+	tmpFile.Close()
+
+	if err := github.NewGitHubClient().DownloadBinary(downloadURL, tmpFile.Name()); err != nil {
+		return fmt.Errorf("failed to download socket_vmnet: %w", err)
+	}
+
+	if err := verifySocketVMNetChecksum(checksumsURL, assetName, tmpFile.Name()); err != nil {
+		logger.Warnf("failed to verify socket_vmnet checksum: %v", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "sudo", "tar", "--extract", "--file", tmpFile.Name(), "--directory", "/", "opt/socket_vmnet")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to extract socket_vmnet archive: %w", err)
+	}
+
+	logger.Infof("installed socket_vmnet to %s", socketVMNetInstallPath)
+	return nil
+}
+
+// findSHA256ForAsset finds the hex digest for assetName within the contents
+// of a combined SHA256SUMS file (standard `sha256sum` output: one "<hash>
+// <filename>" pair per line).
+func findSHA256ForAsset(sha256sums []byte, assetName string) (string, error) {
+	for _, line := range strings.Split(string(sha256sums), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == assetName {
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("no checksum found for %s", assetName)
+}
+
+func verifySocketVMNetChecksum(checksumsURL, assetName, filePath string) error {
+	// explicit timeout, matching every other HTTP call in this codebase
+	// (pkg/util/github.NewGitHubClient, minikube/binary_manager.go's own
+	// verifyChecksum) - http.Get alone uses http.DefaultClient, which never
+	// times out and would hang indefinitely against a stalled server.
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(checksumsURL)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	sums, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	expected, err := findSHA256ForAsset(sums, assetName)
+	if err != nil {
+		return err
+	}
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return err
+	}
+
+	actual := hex.EncodeToString(hash.Sum(nil))
+	if actual != expected {
+		return fmt.Errorf("checksum mismatch: expected %s, got %s", expected, actual)
+	}
+
+	return nil
+}
+
+// limaSudoersPath returns the per-OS path `limactl sudoers` output belongs
+// at, matching the defaults Lima's own pkg/networks/config.go hardcodes.
+func limaSudoersPath() string {
+	if runtime.GOOS == "darwin" {
+		return "/private/etc/sudoers.d/lima"
+	}
+	return "/etc/sudoers.d/lima"
+}
+
+// ensureLimaSudoers runs the one-time `limactl sudoers` setup Lima's shared
+// network mode needs on both macOS (socket_vmnet) and Linux (Lima's bundled
+// privileged network helper) - checked first via --check so an already
+// up-to-date file never prompts for sudo.
+func ensureLimaSudoers() error {
+	path := limaSudoersPath()
+
+	checkCmd := exec.Command(limactlBinary, "sudoers", "--check", path)
+	if err := checkCmd.Run(); err == nil {
+		return nil
+	}
+
+	logger.Infof("configuring %s for lima's network helpers", path)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	if err := network.ValidateSudoAccess(ctx); err != nil {
+		return fmt.Errorf("sudo access required to configure %s: %w", path, err)
+	}
+
+	sudoersCmd := exec.Command(limactlBinary, "sudoers")
+	content, err := sudoersCmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to generate sudoers content: %w", wrapOutputError(err))
+	}
+
+	teeCmd := exec.CommandContext(ctx, "sudo", "tee", path)
+	teeCmd.Stdin = bytes.NewReader(content)
+	teeCmd.Stdout = io.Discard
+	teeCmd.Stderr = os.Stderr
+	if err := teeCmd.Run(); err != nil {
+		return fmt.Errorf("failed to write %s: %w", path, err)
+	}
+
+	return nil
 }
 
 // limaImageSpec mirrors the fields of a Lima template's `images[]` entry

@@ -99,3 +99,20 @@ var _ = Describe("parseLimaInstanceListJSON", func() {
 		}))
 	})
 })
+
+var _ = Describe("findSHA256ForAsset", func() {
+	It("finds the matching checksum line", func() {
+		sums := []byte("aaaa1111  socket_vmnet-1.2.2-arm64.tar.gz\nbbbb2222  socket_vmnet-1.2.2-x86_64.tar.gz\n")
+
+		hash, err := findSHA256ForAsset(sums, "socket_vmnet-1.2.2-arm64.tar.gz")
+
+		Expect(err).NotTo(HaveOccurred())
+		Expect(hash).To(Equal("aaaa1111"))
+	})
+
+	It("errors when the asset isn't listed", func() {
+		_, err := findSHA256ForAsset([]byte("aaaa1111  other-file.tar.gz\n"), "missing.tar.gz")
+
+		Expect(err).To(HaveOccurred())
+	})
+})
