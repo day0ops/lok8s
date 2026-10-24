@@ -54,15 +54,11 @@ func generateClusterToken() (string, error) {
 // optional, since k3s's own ServiceLB/Klipper would otherwise fight MetalLB
 // for LoadBalancer Services, and Traefik would squat on ports 80/443.
 // kube-proxy is intentionally left running (see the kubeProxyReplacement
-// values passed alongside InstallCilium): cross-node pod traffic to a
-// ClusterIP backed by a host-networked pod (like k3s's own apiserver Service)
-// hangs on TLS handshakes under kube-proxy's iptables DNAT in this
-// environment, so Cilium's socket-based kube-proxy replacement is used
-// instead - but disabling kube-proxy outright at boot leaves nothing routing
-// Services during the window before Cilium's own agents finish starting,
-// breaking coredns and friends. Running both is redundant, not conflicting:
-// Cilium's replacement intercepts at the socket layer ahead of kube-proxy's
-// iptables rules once it's up.
+// values passed alongside InstallCilium): Cilium's own kube-proxy
+// replacement is disabled for this provider because its eBPF service
+// translation doesn't take effect for pod-originated traffic to a ClusterIP
+// in this environment, so k3s's own iptables-based kube-proxy is the one
+// actually routing Services, not a redundant fallback.
 func controlPlaneArgs(token, nodeName, tlsSAN string) []string {
 	return []string{
 		"server",

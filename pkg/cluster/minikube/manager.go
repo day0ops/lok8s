@@ -177,12 +177,14 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 
 		// enable CSI support
 		if err := m.enableCSI(clusterName); err != nil {
-			logger.Errorf("failed to enable CSI on %s: %v", clusterName, err)
+			m.cleanupFailedCluster(clusterName)
+			return fmt.Errorf("failed to enable CSI on %s: %w", clusterName, err)
 		}
 
 		// enable metrics-server addon
 		if err := m.enableMetricsServer(clusterName); err != nil {
-			logger.Errorf("failed to enable metrics-server on %s: %v", clusterName, err)
+			m.cleanupFailedCluster(clusterName)
+			return fmt.Errorf("failed to enable metrics-server on %s: %w", clusterName, err)
 		}
 	}
 
@@ -243,7 +245,7 @@ func (m *Manager) cleanupFailedCluster(clusterName string) {
 		return
 	}
 
-	if err := m.deleteCluster(binaryPath, clusterName, false); err != nil {
+	if err := m.deleteCluster(binaryPath, clusterName); err != nil {
 		logger.Warnf("failed to delete cluster %s during cleanup: %v", clusterName, err)
 	}
 }
@@ -306,13 +308,13 @@ func (m *Manager) DeleteClusters(opts *DeleteOptions) error {
 		status.Start(fmt.Sprintf("deleting Minikube cluster %s (%d/%d)", clusterName, i, opts.NumClusters))
 
 		// try deleting with current naming scheme first
-		err := m.deleteCluster(binaryPath, clusterName, opts.Force)
+		err := m.deleteCluster(binaryPath, clusterName)
 		if err != nil {
 			// if it fails and we're using the new naming scheme (no suffix), try the old naming scheme for backward compatibility
 			if opts.NumClusters == 1 {
 				oldClusterName := fmt.Sprintf("%s-%d", opts.Project, i)
 				logger.Debugf("cluster %s not found, trying old naming scheme: %s", clusterName, oldClusterName)
-				if err2 := m.deleteCluster(binaryPath, oldClusterName, opts.Force); err2 != nil {
+				if err2 := m.deleteCluster(binaryPath, oldClusterName); err2 != nil {
 					status.End(false)
 					logger.Errorf("failed to delete cluster %s or %s: %v / %v", clusterName, oldClusterName, err, err2)
 					return fmt.Errorf("failed to delete cluster %s (also tried %s): %w", clusterName, oldClusterName, err)
@@ -460,13 +462,20 @@ func (m *Manager) StatusClusters(opts *StatusOptions) error {
 	return nil
 }
 
-// deleteCluster deletes a single minikube cluster and captures error output
-func (m *Manager) deleteCluster(binaryPath, clusterName string, force bool) error {
-	args := []string{"delete", "-p", clusterName}
-	if force {
-		args = append(args, "--purge=true")
-	}
-	cmd := exec.Command(binaryPath, args...)
+// deleteCluster deletes a single minikube cluster and captures error output.
+//
+// Deliberately never passes minikube's own --purge flag: despite the name,
+// it doesn't scope to -p's profile - it deletes the entire shared
+// ~/.minikube directory outright, which every other minikube profile on the
+// machine depends on (lok8s's own other projects/clusters included).
+// minikube refuses to combine -p with --purge whenever other profiles
+// exist, surfacing as "Exiting due to MK_USAGE: Usage: minikube delete
+// --all --purge" - and even if it didn't refuse, this would silently wipe
+// other projects' state. Plain `minikube delete -p <name>` already deletes
+// the VM and all of that profile's own files, which is everything a
+// per-cluster delete needs.
+func (m *Manager) deleteCluster(binaryPath, clusterName string) error {
+	cmd := exec.Command(binaryPath, "delete", "-p", clusterName)
 
 	// only stream minikube's own output live when verbose logging is enabled;
 	// otherwise capture it silently and surface it if the command fails
