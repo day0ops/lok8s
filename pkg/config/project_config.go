@@ -56,6 +56,9 @@ type ProjectConfig struct {
 	ContainerRuntime string `yaml:"container_runtime"`
 	ContainerEngine  string `yaml:"container_engine"`
 
+	// native specific options
+	NativeVMBackend string `yaml:"native_vm_backend"`
+
 	// load balancer options
 	InstallMetalLB       bool `yaml:"install_metallb"`
 	InstallCloudProvider bool `yaml:"install_cloud_provider"`
@@ -262,6 +265,9 @@ func MergeConfigs(base, override *ProjectConfig) *ProjectConfig {
 	if override.ContainerEngine != "" {
 		merged.ContainerEngine = override.ContainerEngine
 	}
+	if override.NativeVMBackend != "" {
+		merged.NativeVMBackend = override.NativeVMBackend
+	}
 
 	// boolean flags are always overridden
 	merged.InstallMetalLB = override.InstallMetalLB
@@ -335,6 +341,9 @@ func (cm *ConfigManager) MergeConfig(project string, cmdConfig *ProjectConfig) (
 	}
 	if cmdConfig.ContainerEngine != "" {
 		mergedConfig.ContainerEngine = cmdConfig.ContainerEngine
+	}
+	if cmdConfig.NativeVMBackend != "" {
+		mergedConfig.NativeVMBackend = cmdConfig.NativeVMBackend
 	}
 
 	// boolean flags are always overridden by command line

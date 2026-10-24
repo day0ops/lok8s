@@ -412,6 +412,24 @@ invalid: yaml: content: [`
 					Expect(merged.SkipMetalLB).To(Equal(override.SkipMetalLB))
 				})
 			})
+
+			It("overrides NativeVMBackend when the override specifies one", func() {
+				base := &ProjectConfig{NativeVMBackend: "container"}
+				override := &ProjectConfig{NativeVMBackend: "lima"}
+
+				merged := MergeConfigs(base, override)
+
+				Expect(merged.NativeVMBackend).To(Equal("lima"))
+			})
+
+			It("keeps the base NativeVMBackend when the override doesn't specify one", func() {
+				base := &ProjectConfig{NativeVMBackend: "container"}
+				override := &ProjectConfig{}
+
+				merged := MergeConfigs(base, override)
+
+				Expect(merged.NativeVMBackend).To(Equal("container"))
+			})
 		})
 
 		Context("ConfigManager.MergeConfig", func() {
