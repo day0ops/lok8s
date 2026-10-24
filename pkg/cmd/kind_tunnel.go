@@ -68,6 +68,15 @@ Use this command to:
 				return fmt.Errorf("project name is required")
 			}
 
+			// --terminate only needs the process cache, not a live project
+			// config: lok8s delete can't terminate this process itself on
+			// macOS (it runs as root via sudo, while delete deliberately
+			// doesn't), so this is the only way to clean it up once the
+			// project's config is already gone.
+			if terminate {
+				return terminateCloudProviderProcesses(project)
+			}
+
 			// load saved config to get environment and other settings
 			savedConfig, err := configManager.LoadConfig(project)
 			if err != nil {
@@ -81,11 +90,8 @@ Use this command to:
 
 			if showPorts {
 				return showLoadBalancerPorts(project, savedConfig.NumClusters, format)
-			} else if terminate {
-				return terminateCloudProviderProcesses(project)
-			} else {
-				return startCloudProviderProcesses(project)
 			}
+			return startCloudProviderProcesses(project)
 		},
 	}
 
@@ -175,34 +181,35 @@ func startCloudProviderProcesses(project string) error {
 func terminateCloudProviderProcesses(project string) error {
 	logger.Infof("terminating cloud-provider-kind processes for project %s", project)
 
-	// load saved config to get number of clusters
-	savedConfig, err := configManager.LoadConfig(project)
-	if err != nil {
-		return fmt.Errorf("failed to load project config: %w", err)
-	}
-
-	if savedConfig == nil {
-		return fmt.Errorf("project %s not found", project)
-	}
-
 	cloudProviderManager := services.NewCloudProviderKindManager()
-	clusterIndex := 1
 
-	var contextName string
-	if savedConfig.NumClusters == 1 {
-		// if only one cluster, don't add suffix
-		contextName = project
-	} else {
-		contextName = fmt.Sprintf("%s-%d", project, clusterIndex)
+	// match against the process cache directly instead of reconstructing
+	// the expected context name from project config (project could be a
+	// single-cluster "myproject" or multi-cluster "myproject-1" etc.) -
+	// the cache already records the real context name, and doesn't depend
+	// on the project config still existing.
+	_, processes, err := cloudProviderManager.HasExistingProcesses()
+	if err != nil {
+		return fmt.Errorf("failed to list cloud-provider-kind processes: %w", err)
 	}
 
-	logger.Infof("terminating cloud-provider-kind for context %s", contextName)
+	var matched bool
+	for _, p := range processes {
+		if p.ContextName != project && !strings.HasPrefix(p.ContextName, project+"-") {
+			continue
+		}
+		matched = true
+		logger.Infof("terminating cloud-provider-kind for context %s", p.ContextName)
+		if err := cloudProviderManager.Terminate(p.ContextName, true); err != nil {
+			logger.Warnf("failed to terminate cloud-provider-kind for context %s: %v", p.ContextName, err)
+			continue
+		}
+		logger.Infof("✓ successfully terminated cloud-provider-kind for context %s", p.ContextName)
+	}
 
-	if err := cloudProviderManager.Terminate(contextName, true); err != nil {
-		logger.Warnf("failed to terminate cloud-provider-kind for context %s: %v", contextName, err)
-		// continue with other clusters even if one fails
-	} else {
-		logger.Infof("✓ successfully terminated cloud-provider-kind for context %s", contextName)
+	if !matched {
+		logger.Infof("no cloud-provider-kind processes found for project %s", project)
+		return nil
 	}
 
 	logger.Infof("🎉 cloud-provider-kind processes terminated for project %s", project)
