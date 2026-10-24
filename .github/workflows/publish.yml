@@ -33,6 +33,8 @@ jobs:
           fetch-depth: 0
 
       - uses: ./.github/workflows/composite-actions/unit-tests
+        with:
+          codecov-token: ${{ secrets.CODECOV_TOKEN }}
 
   build:
     needs: [lint, unit-tests]

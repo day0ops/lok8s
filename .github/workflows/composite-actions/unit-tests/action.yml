@@ -1,6 +1,11 @@
 name: "Unit Tests"
 description: "Run unit tests for lok8s"
 
+inputs:
+  codecov-token:
+    description: "Codecov upload token (secrets aren't available directly inside composite actions, so callers must pass secrets.CODECOV_TOKEN through explicitly)"
+    required: false
+
 runs:
   using: "composite"
   steps:
@@ -20,9 +25,10 @@ runs:
       run: |
         go test -v -race -coverprofile=coverage.out ./pkg/...
 
-    - name: Upload coverage reports
-      uses: codecov/codecov-action@v4
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v5
       with:
-        file: ./coverage.out
+        token: ${{ inputs.codecov-token }}
+        files: ./coverage.out
         flags: unittests
         name: codecov-umbrella
