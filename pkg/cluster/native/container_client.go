@@ -60,9 +60,9 @@ func wrapOutputError(err error) error {
 // mirroring the pattern already used for docker/podman in pkg/util/docker.
 type ContainerClient struct{}
 
-// NewNodeClient creates the macOS NodeClient implementation
-func NewNodeClient() NodeClient {
-	return &ContainerClient{}
+// newContainerClient creates the macOS NodeClient implementation
+func newContainerClient() (NodeClient, error) {
+	return &ContainerClient{}, nil
 }
 
 // containerInspectNetwork mirrors the relevant fields of `container inspect`'s

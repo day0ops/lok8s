@@ -57,19 +57,6 @@ import (
 // incusBinary is the Incus CLI (https://linuxcontainers.org/incus/).
 const incusBinary = "incus"
 
-// installK3sScript downloads and runs k3s's own install script inside a
-// freshly-booted node, forwarding installK3s's own trailing arguments to it
-// via "$@" rather than any string interpolation - see installK3s for why
-// that matters. It also opportunistically installs curl first: Incus's
-// `images:` VM images are cloud-oriented but haven't been confirmed to all
-// ship curl by default.
-const installK3sScript = `
-if ! command -v curl >/dev/null 2>&1; then
-  apt-get update -qq && apt-get install -y -qq curl
-fi
-curl -sfL https://get.k3s.io | sh -s - "$@"
-`
-
 // incusVersionPattern extracts the first semver-looking token from `incus
 // version`'s output (documented as printing e.g. "Client version: 6.0.0").
 // Matching loosely rather than an exact label is deliberate, since the exact
@@ -90,9 +77,9 @@ func wrapOutputError(err error) error {
 // library, mirroring the pattern used for Apple's `container` CLI.
 type IncusClient struct{}
 
-// NewNodeClient creates the Linux NodeClient implementation
-func NewNodeClient() NodeClient {
-	return &IncusClient{}
+// newIncusClient creates the Linux NodeClient implementation
+func newIncusClient() (NodeClient, error) {
+	return &IncusClient{}, nil
 }
 
 // incusInstanceAddress mirrors the relevant fields of an `incus list

@@ -140,8 +140,15 @@ func NewManager() *Manager {
 	k8sConfigPath, _ := k8s.GetKubeConfigPath()
 	helmManager := helm.NewHelmManager(k8sConfigPath)
 
+	// the empty backend always resolves to this platform's own compiled-in
+	// default (container on macOS, incus on Linux), which never errors
+	client, err := NewNodeClient("")
+	if err != nil {
+		panic(fmt.Sprintf("unreachable: default native backend failed to resolve: %v", err))
+	}
+
 	return &Manager{
-		client:        NewNodeClient(),
+		client:        client,
 		helmManager:   helmManager,
 		ciliumManager: services.NewCiliumManager(helmManager, nil), // native doesn't need a binary manager
 		// native nodes are directly IP-addressable on the project's routable

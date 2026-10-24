@@ -22,10 +22,15 @@
 
 package native
 
+import (
+	"fmt"
+	"runtime"
+)
+
 // NodeClient abstracts the platform-specific mechanism used to run node VMs:
 // Apple's `container` CLI on macOS (container_client.go), Incus on Linux
-// (incus_client.go). NewNodeClient (defined once per platform file, gated by
-// a //go:build tag) returns whichever one applies to the host running lok8s.
+// (incus_client.go), or Lima on either (lima_client.go). NewNodeClient
+// returns whichever one applies to the requested backend.
 //
 // Each implementation owns turning "boot a control-plane/worker running this
 // k3s version" into whatever multi-step dance its platform needs. On macOS
@@ -73,4 +78,34 @@ type NodeClient interface {
 	ListNodeNames(prefix string) ([]string, error)
 	// Delete deletes one or more nodes, forcing removal if still running.
 	Delete(nodeNames ...string) error
+}
+
+// NewNodeClient resolves the NodeClient implementation for backend:
+// "container" (macOS only), "incus" (Linux only), or "lima" (either). An
+// empty backend resolves to the platform's existing default - "container"
+// on macOS, "incus" on Linux - so callers that never specify a backend keep
+// today's behavior unchanged.
+func NewNodeClient(backend string) (NodeClient, error) {
+	if backend == "" {
+		backend = defaultNativeBackend()
+	}
+
+	switch backend {
+	case "container":
+		return newContainerClient()
+	case "incus":
+		return newIncusClient()
+	case "lima":
+		return newLimaClient()
+	default:
+		return nil, fmt.Errorf("unknown native VM backend %q, valid options are: container, incus, lima", backend)
+	}
+}
+
+// defaultNativeBackend returns the backend used when none is explicitly requested.
+func defaultNativeBackend() string {
+	if runtime.GOOS == "darwin" {
+		return "container"
+	}
+	return "incus"
 }
