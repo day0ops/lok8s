@@ -37,6 +37,19 @@ import (
 // k3sAPIPort is the port k3s's embedded API server listens on
 const k3sAPIPort = 6443
 
+// installK3sScript downloads and runs k3s's own install script inside a
+// freshly-booted node, forwarding installK3s's own trailing arguments to it
+// via "$@" rather than any string interpolation - see installK3s for why
+// that matters. It also opportunistically installs curl first: the VM
+// images used by both Incus and Lima are cloud-oriented but haven't been
+// confirmed to all ship curl by default.
+const installK3sScript = `
+if ! command -v curl >/dev/null 2>&1; then
+  apt-get update -qq && apt-get install -y -qq curl
+fi
+curl -sfL https://get.k3s.io | sh -s - "$@"
+`
+
 // generateClusterToken generates a random token used to authenticate node joins.
 // The same token is reused for the control-plane and every worker, so no
 // separate node-token extraction step is needed.

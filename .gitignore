@@ -82,3 +82,8 @@ config.yaml
 # Test coverage
 coverage.out
 coverage.html
+
+#### Claude Code / superpowers scratch ####
+#############################################
+.superpowers/
+docs/superpowers/

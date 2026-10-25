@@ -69,7 +69,7 @@ func (n *Network) EnsureNetwork() error {
 
 	// validate sudo access early, before starting spinner
 	// this prevents sudo prompt from interleaving with spinner animation
-	if err := validateSudoAccess(ctx); err != nil {
+	if err := ValidateSudoAccess(ctx); err != nil {
 		return fmt.Errorf("sudo access required for network setup: %w", err)
 	}
 
@@ -103,7 +103,7 @@ func (n *Network) DeleteNetwork(force bool) error {
 
 	// validate sudo access early if force deletion is requested (requires sudo)
 	if force {
-		if err := validateSudoAccess(ctx); err != nil {
+		if err := ValidateSudoAccess(ctx); err != nil {
 			return fmt.Errorf("sudo access required for force deletion: %w", err)
 		}
 	}
@@ -220,28 +220,6 @@ func installVmnetHelper(ctx context.Context) error {
 	}
 
 	logger.Debugf("✓ vmnet-helper installation completed")
-	return nil
-}
-
-// validateSudoAccess validates sudo access by checking if sudo session is active
-func validateSudoAccess(ctx context.Context) error {
-	// first, try to validate sudo without prompting (non-interactive)
-	// this will succeed if sudo session is already active
-	cmd := exec.CommandContext(ctx, "sudo", "-n", "-v")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err == nil {
-		return nil
-	}
-
-	// sudo session is not active, prompt for password
-	logger.Debugf("sudo session not active, prompting for password")
-	cmd = exec.CommandContext(ctx, "sudo", "-v")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("sudo validation failed: %w", err)
-	}
 	return nil
 }
 

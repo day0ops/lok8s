@@ -69,6 +69,8 @@ For now this tool is limited to macOS and Linux platforms.
 
 #### Native Provider Requirements (`--environment native`)
 
+The native provider has three selectable VM backends, chosen with `--native-vm-backend` (defaults to `container` on macOS, `incus` on Linux):
+
 On macOS:
 
 - macOS 26 or later on Apple Silicon (Intel Macs and older macOS versions aren't supported - this is Apple's own requirement for the `container` CLI, not a choice made by lok8s)
@@ -80,6 +82,17 @@ On Linux:
 
 > [!WARNING]
 > The Incus backend is best-effort and has not been verified against a real Incus install - it was written against Incus's documented CLI/API behavior with no Linux host available during development. Expect to find and fix real issues before relying on it (see `pkg/cluster/native/incus_client.go`'s header comment for the specific things most likely to need adjustment).
+
+On macOS or Linux, via `--native-vm-backend lima`:
+
+- [Lima](https://lima-vm.io/) (`limactl`) 2.0.0 or later - e.g. `brew install lima` on macOS, or your distro's package manager on Linux. lok8s checks for it but does not install it.
+- On macOS, [`socket_vmnet`](https://github.com/lima-vm/socket_vmnet) is required for Lima's routable shared networking - lok8s auto-installs it to `/opt/socket_vmnet` on first use, prompting for `sudo` if needed, the same way it manages `vmnet-helper` for Minikube.
+- A one-time `sudo`-gated `limactl sudoers` setup also runs automatically on first use, on either OS, to grant Lima's network helpers (`socket_vmnet` on macOS, Lima's own bundled helper on Linux) the privileges they need.
+
+> [!WARNING]
+> The Lima backend's macOS path has been verified end-to-end, including cross-cluster node reachability (see `pkg/cluster/native/lima_client.go`'s header comment). Linux has not - its networking setup (a privileged helper distinct from macOS's `socket_vmnet`) is the least exercised path and is expected to need the most scrutiny.
+>
+> If `socket_vmnet` fails to start a network with a `VMNET_SHARING_SERVICE_BUSY` error, another process is already holding a shared-mode vmnet network - check for leftover `container-network-vmnet` processes from lok8s's own native `container` backend (`lok8s delete` without `--force` intentionally leaves a project's network running for reuse) or other vmnet-based tools.
 
 ### Download the Binary
 
@@ -129,6 +142,9 @@ lok8s create -p myproject -n 1 --environment native --nodes 0
 
 # Create a native cluster with 2 worker nodes
 lok8s create -p myproject -n 1 --environment native --nodes 2
+
+# Create a native cluster using Lima instead of container/incus
+lok8s create -p myproject -n 1 --environment native --native-vm-backend lima --nodes 0
 ```
 
 ### Deleting Clusters
