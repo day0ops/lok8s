@@ -640,19 +640,32 @@ func ensureNetworkDHCPEnd(name string, gateway net.IP) error {
 }
 
 // DeleteNetwork deletes a lima network. Deleting one that doesn't exist is
-// treated as success.
+// treated as success. Lima sudoers setup (see CreateNetwork's identical
+// comment) is refreshed afterward too: removing a network also changes
+// ~/.lima/_config/networks.yaml, which can leave a previously-generated
+// sudoers file stale for any other lima operation that runs afterward -
+// confirmed live, where deleting one project's network caused a second
+// project's subsequent node deletion to fail with a sudoers-out-of-sync
+// error even though the node itself was removed successfully.
 func (c *LimaClient) DeleteNetwork(name string) error {
 	cmd := exec.Command(limactlBinary, "network", "delete", "--force", name)
 	output, err := util.RunCommand(cmd)
 	if err != nil {
 		if exists, existsErr := c.NetworkExists(name); existsErr == nil && !exists {
 			logger.Debugf("network %s already deleted", name)
+			if err := ensureLimaSudoers(); err != nil {
+				return fmt.Errorf("failed to refresh lima sudoers after deleting network %s: %w", name, err)
+			}
 			return nil
 		}
 		if output != "" {
 			return fmt.Errorf("failed to delete network %s: %w: %s", name, err, output)
 		}
 		return fmt.Errorf("failed to delete network %s: %w", name, err)
+	}
+
+	if err := ensureLimaSudoers(); err != nil {
+		return fmt.Errorf("failed to refresh lima sudoers after deleting network %s: %w", name, err)
 	}
 
 	return nil
