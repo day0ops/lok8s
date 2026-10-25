@@ -42,7 +42,8 @@ import (
 )
 
 // Manager manages native clusters: VM-per-node Kubernetes via Apple's
-// `container` CLI on macOS, or Incus on Linux (see client.go's NodeClient).
+// `container` CLI on macOS, Incus on Linux, or Lima on either (see
+// client.go's NodeClient and its three implementations).
 type Manager struct {
 	client         NodeClient
 	helmManager    *helm.HelmManager
@@ -410,7 +411,25 @@ func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to check for existing network %s: %w", networkName, err)
 	}
+
+	// route through CreateNetwork even when the network already exists: for
+	// the Lima backend, CreateNetwork does important idempotent work (dhcpEnd
+	// patch, sudoers refresh) on every call that a bare early-return here
+	// would skip, breaking self-heal after a partial failure; container/
+	// incus's own CreateNetwork is a no-op here, so this is free for them.
 	if exists {
+		existingSubnets, err := m.client.ListNetworkSubnets()
+		if err != nil {
+			return "", fmt.Errorf("failed to look up existing network %s: %w", networkName, err)
+		}
+		existingSubnet, ok := existingSubnets[networkName]
+		if !ok {
+			return "", fmt.Errorf("network %s exists but has no known subnet", networkName)
+		}
+		opts.SubnetCIDR = existingSubnet
+		if err := m.client.CreateNetwork(networkName, existingSubnet); err != nil {
+			return "", fmt.Errorf("failed to ensure existing network %s: %w", networkName, err)
+		}
 		return networkName, nil
 	}
 
