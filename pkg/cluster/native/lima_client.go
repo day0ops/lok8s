@@ -40,9 +40,12 @@
 // active for the current build, and this file compiles alongside whichever
 // one that is.
 //
-// IMPORTANT: this file was written against limactl's documented CLI and
-// network/sudoers/boot behavior, not verified against a real Lima install
-// on either macOS or Linux.
+// IMPORTANT: this file has been verified end-to-end against a real Lima
+// install on macOS (single and multi-cluster, including cross-cluster node
+// reachability - see docs/superpowers/specs/2026-10-24-lima-vm-support-design.md).
+// It has NOT been verified on Linux: its networking setup (a privileged
+// helper distinct from macOS's socket_vmnet) is the least exercised path
+// and was only written against limactl's documented CLI behavior.
 
 package native
 

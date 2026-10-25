@@ -90,7 +90,9 @@ On macOS or Linux, via `--native-vm-backend lima`:
 - A one-time `sudo`-gated `limactl sudoers` setup also runs automatically on first use, on either OS, to grant Lima's network helpers (`socket_vmnet` on macOS, Lima's own bundled helper on Linux) the privileges they need.
 
 > [!WARNING]
-> The Lima backend has not yet been verified against a real `limactl` install on either platform. Linux is expected to need the most scrutiny, since its networking setup (a privileged helper distinct from macOS's `socket_vmnet`) is the least exercised path.
+> The Lima backend's macOS path has been verified end-to-end, including cross-cluster node reachability (see `pkg/cluster/native/lima_client.go`'s header comment). Linux has not - its networking setup (a privileged helper distinct from macOS's `socket_vmnet`) is the least exercised path and is expected to need the most scrutiny.
+>
+> If `socket_vmnet` fails to start a network with a `VMNET_SHARING_SERVICE_BUSY` error, another process is already holding a shared-mode vmnet network - check for leftover `container-network-vmnet` processes from lok8s's own native `container` backend (`lok8s delete` without `--force` intentionally leaves a project's network running for reuse) or other vmnet-based tools.
 
 ### Download the Binary
 
