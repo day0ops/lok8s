@@ -82,6 +82,8 @@ type fakeNodeClient struct {
 	networkSubnetsErr error
 	createNetworkErr  error
 	createdNetworks   []createdNetwork
+	deleteNetworkErr  error
+	deletedNetworks   []string
 }
 
 // createdNetwork records a single CreateNetwork call for assertions.
@@ -101,7 +103,10 @@ func (f *fakeNodeClient) CreateNetwork(name, subnetCIDR string) error {
 	f.createdNetworks = append(f.createdNetworks, createdNetwork{name: name, subnet: subnetCIDR})
 	return f.createNetworkErr
 }
-func (f *fakeNodeClient) DeleteNetwork(name string) error { return nil }
+func (f *fakeNodeClient) DeleteNetwork(name string) error {
+	f.deletedNetworks = append(f.deletedNetworks, name)
+	return f.deleteNetworkErr
+}
 func (f *fakeNodeClient) BootControlPlane(nodeName, network, k8sVersion, token, tlsSAN string) error {
 	return nil
 }
@@ -250,10 +255,11 @@ var _ = Describe("Manager", func() {
 		It("routes through CreateNetwork with the network's existing subnet, not a freshly computed one", func() {
 			client.networkSubnets = map[string]string{networkName: "10.42.0.0/24"}
 
-			gotName, err := manager.ensureNetwork(opts)
+			gotName, created, err := manager.ensureNetwork(opts)
 
 			Expect(err).NotTo(HaveOccurred())
 			Expect(gotName).To(Equal(networkName))
+			Expect(created).To(BeFalse(), "a pre-existing network must not be reported as freshly created")
 			Expect(client.createdNetworks).To(ConsistOf(createdNetwork{name: networkName, subnet: "10.42.0.0/24"}))
 			Expect(opts.SubnetCIDR).To(Equal("10.42.0.0/24"))
 		})
@@ -261,11 +267,52 @@ var _ = Describe("Manager", func() {
 		It("errors instead of proceeding when the existing network has no known subnet", func() {
 			client.networkSubnets = map[string]string{"some-other-network": "10.42.0.0/24"}
 
-			_, err := manager.ensureNetwork(opts)
+			_, _, err := manager.ensureNetwork(opts)
 
 			Expect(err).To(HaveOccurred())
 			Expect(err.Error()).To(ContainSubstring("no known subnet"))
 			Expect(client.createdNetworks).To(BeEmpty())
+		})
+
+		It("reports a freshly created network as such", func() {
+			client.networkExists = false
+
+			gotName, created, err := manager.ensureNetwork(opts)
+
+			Expect(err).NotTo(HaveOccurred())
+			Expect(gotName).To(Equal(networkName))
+			Expect(created).To(BeTrue())
+			Expect(client.createdNetworks).To(ConsistOf(createdNetwork{name: networkName, subnet: opts.SubnetCIDR}))
+		})
+	})
+
+	Describe("cleanupFreshNetwork", func() {
+		var (
+			client  *fakeNodeClient
+			manager *Manager
+		)
+
+		BeforeEach(func() {
+			client = &fakeNodeClient{}
+			manager = &Manager{client: client}
+		})
+
+		It("deletes the network when it was freshly created and the first cluster failed", func() {
+			manager.cleanupFreshNetwork("net", true, 1)
+
+			Expect(client.deletedNetworks).To(ConsistOf("net"))
+		})
+
+		It("leaves a pre-existing network alone even if the first cluster failed", func() {
+			manager.cleanupFreshNetwork("net", false, 1)
+
+			Expect(client.deletedNetworks).To(BeEmpty())
+		})
+
+		It("leaves the network alone once an earlier cluster in the run already depends on it", func() {
+			manager.cleanupFreshNetwork("net", true, 2)
+
+			Expect(client.deletedNetworks).To(BeEmpty())
 		})
 	})
 })

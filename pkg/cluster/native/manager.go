@@ -173,7 +173,7 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 
 	// one network per project (not per cluster), so every cluster and node
 	// within a project shares one routable, isolated segment
-	networkName, err := m.ensureNetwork(opts)
+	networkName, networkCreated, err := m.ensureNetwork(opts)
 	if err != nil {
 		return fmt.Errorf("failed to set up network: %w", err)
 	}
@@ -183,11 +183,13 @@ func (m *Manager) CreateClusters(opts *CreateOptions) error {
 
 		cpIP, err := m.createCluster(clusterName, contextName, networkName, opts)
 		if err != nil {
+			m.cleanupFreshNetwork(networkName, networkCreated, i)
 			return fmt.Errorf("failed to create cluster %s: %w", clusterName, err)
 		}
 
 		if err := m.installCNIAndLoadBalancer(contextName, cpIP, i, opts); err != nil {
 			m.cleanupFailedCluster(clusterName, contextName)
+			m.cleanupFreshNetwork(networkName, networkCreated, i)
 			return fmt.Errorf("failed to provision cluster %s: %w", clusterName, err)
 		}
 	}
@@ -403,13 +405,16 @@ func (m *Manager) checkPrerequisites() error {
 // ensureNetwork creates the project's shared network if it doesn't already
 // exist, picking a free subnet if the requested one is already in use by
 // another project's network. opts.SubnetCIDR is updated to whichever subnet
-// actually ends up in use, so the caller can persist it.
-func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
+// actually ends up in use, so the caller can persist it. The returned bool
+// reports whether this call created the network, as opposed to reusing one
+// that already existed - callers use it to decide whether they own the
+// network and may safely delete it again on failure.
+func (m *Manager) ensureNetwork(opts *CreateOptions) (string, bool, error) {
 	networkName := projectNetworkName(opts.Project)
 
 	exists, err := m.client.NetworkExists(networkName)
 	if err != nil {
-		return "", fmt.Errorf("failed to check for existing network %s: %w", networkName, err)
+		return "", false, fmt.Errorf("failed to check for existing network %s: %w", networkName, err)
 	}
 
 	// route through CreateNetwork even when the network already exists: for
@@ -420,22 +425,22 @@ func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
 	if exists {
 		existingSubnets, err := m.client.ListNetworkSubnets()
 		if err != nil {
-			return "", fmt.Errorf("failed to look up existing network %s: %w", networkName, err)
+			return "", false, fmt.Errorf("failed to look up existing network %s: %w", networkName, err)
 		}
 		existingSubnet, ok := existingSubnets[networkName]
 		if !ok {
-			return "", fmt.Errorf("network %s exists but has no known subnet", networkName)
+			return "", false, fmt.Errorf("network %s exists but has no known subnet", networkName)
 		}
 		opts.SubnetCIDR = existingSubnet
 		if err := m.client.CreateNetwork(networkName, existingSubnet); err != nil {
-			return "", fmt.Errorf("failed to ensure existing network %s: %w", networkName, err)
+			return "", false, fmt.Errorf("failed to ensure existing network %s: %w", networkName, err)
 		}
-		return networkName, nil
+		return networkName, false, nil
 	}
 
 	freeSubnet, err := FindFreeSubnet(m.client, opts.SubnetCIDR, 1, 50)
 	if err != nil {
-		return "", fmt.Errorf("failed to find a free subnet: %w", err)
+		return "", false, fmt.Errorf("failed to find a free subnet: %w", err)
 	}
 	if freeSubnet != opts.SubnetCIDR {
 		logger.Debugf("using generated subnet %s (requested subnet %s is already in use)", freeSubnet, opts.SubnetCIDR)
@@ -443,10 +448,26 @@ func (m *Manager) ensureNetwork(opts *CreateOptions) (string, error) {
 	}
 
 	if err := m.client.CreateNetwork(networkName, freeSubnet); err != nil {
-		return "", fmt.Errorf("failed to create network %s: %w", networkName, err)
+		return "", false, fmt.Errorf("failed to create network %s: %w", networkName, err)
 	}
 
-	return networkName, nil
+	return networkName, true, nil
+}
+
+// cleanupFreshNetwork deletes the project network if this CreateClusters
+// call created it and the failure happened on the very first cluster
+// attempted. Once a later cluster is reached, earlier clusters in the same
+// run already depend on the network, so deleting it here would strand their
+// networking; a pre-existing network (networkCreated false) is left alone
+// unconditionally since other callers may still depend on it.
+func (m *Manager) cleanupFreshNetwork(networkName string, networkCreated bool, failedClusterIndex int) {
+	if !networkCreated || failedClusterIndex != 1 {
+		return
+	}
+
+	if err := m.client.DeleteNetwork(networkName); err != nil {
+		logger.Warnf("failed to clean up network %s, it may need manual removal: %v", networkName, err)
+	}
 }
 
 // createCluster creates a single native cluster's control-plane node and
