@@ -28,6 +28,7 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/day0ops/lok8s/pkg/util/docker"
 	"github.com/sirupsen/logrus"
@@ -152,22 +153,24 @@ func versionCmd() *cobra.Command {
 // createCmd creates clusters using the specified environment
 func createCmd() *cobra.Command {
 	var (
-		project              string
-		bridge               string
-		gatewayIP            string
-		cpu                  string
-		memory               string
-		disk                 string
-		subnetCIDR           string
-		numClusters          int
-		nodeCount            int
-		k8sVersion           string
-		skipMetalLB          bool
-		installCloudProvider bool
-		cni                  string
-		containerRuntime     string
-		containerEngine      string
-		recreate             bool
+		project               string
+		bridge                string
+		gatewayIP             string
+		cpu                   string
+		memory                string
+		disk                  string
+		subnetCIDR            string
+		numClusters           int
+		nodeCount             int
+		k8sVersion            string
+		skipMetalLB           bool
+		installCloudProvider  bool
+		cni                   string
+		containerRuntime      string
+		containerEngine       string
+		recreate              bool
+		ciliumInstallTimeout  time.Duration
+		metallbInstallTimeout time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -187,24 +190,26 @@ func createCmd() *cobra.Command {
 
 			// create command config from flags
 			cmdConfig := &config.ProjectConfig{
-				Project:              project,
-				Environment:          environment,
-				NumClusters:          numClusters,
-				NodeCount:            resolveNodeCountOverride(cmd),
-				K8sVersion:           k8sVersion,
-				GatewayIP:            gatewayIP,
-				SubnetCIDR:           subnetCIDR,
-				Bridge:               bridge,
-				CPU:                  cpu,
-				Memory:               memory,
-				DiskSize:             disk,
-				CNI:                  cni,
-				ContainerRuntime:     containerRuntime,
-				ContainerEngine:      containerEngine,
-				NativeVMBackend:      nativeVMBackend,
-				InstallMetalLB:       !skipMetalLB,
-				InstallCloudProvider: installCloudProvider,
-				SkipMetalLB:          skipMetalLB,
+				Project:               project,
+				Environment:           environment,
+				NumClusters:           numClusters,
+				NodeCount:             resolveNodeCountOverride(cmd),
+				K8sVersion:            k8sVersion,
+				GatewayIP:             gatewayIP,
+				SubnetCIDR:            subnetCIDR,
+				Bridge:                bridge,
+				CPU:                   cpu,
+				Memory:                memory,
+				DiskSize:              disk,
+				CNI:                   cni,
+				ContainerRuntime:      containerRuntime,
+				ContainerEngine:       containerEngine,
+				NativeVMBackend:       nativeVMBackend,
+				InstallMetalLB:        !skipMetalLB,
+				InstallCloudProvider:  installCloudProvider,
+				SkipMetalLB:           skipMetalLB,
+				CiliumInstallTimeout:  resolveDurationOverride(cmd, "cilium-install-timeout"),
+				MetalLBInstallTimeout: resolveDurationOverride(cmd, "metallb-install-timeout"),
 			}
 
 			// load user-defined config file if specified
@@ -309,6 +314,8 @@ func createCmd() *cobra.Command {
 	cmd.Flags().StringVar(&containerRuntime, "container-runtime", "containerd", "Container runtime to use (Kind only, Options: containerd, cri-o, or docker)")
 	cmd.Flags().StringVar(&containerEngine, "container-engine", "", "Preferred container engine for kind clusters (Kind only, Options: docker or podman). If not specified, auto-detects available engine")
 	cmd.Flags().BoolVar(&recreate, "recreate", false, "Recreate clusters even if they already exist (will delete existing clusters first)")
+	cmd.Flags().DurationVar(&ciliumInstallTimeout, "cilium-install-timeout", config.DefaultCiliumInstallTimeout, "Timeout for installing the Cilium Helm chart (Kind and Native only; persists for this project until overridden)")
+	cmd.Flags().DurationVar(&metallbInstallTimeout, "metallb-install-timeout", config.DefaultMetalLBInstallTimeout, "Timeout for installing the MetalLB Helm chart (persists for this project until overridden)")
 
 	if err := cmd.MarkFlagRequired("project"); err != nil {
 		logger.Warnf("failed to mark project flag as required: %v", err)
@@ -331,6 +338,23 @@ func resolveNodeCountOverride(cmd *cobra.Command) int {
 	if err != nil {
 		logger.Warnf("failed to read nodes flag: %v", err)
 		return -1
+	}
+	return value
+}
+
+// resolveDurationOverride returns the named duration flag's value if it was
+// explicitly passed on the command line, or 0 ("not specified") otherwise -
+// the same cmd.Flags().Changed sentinel pattern as resolveNodeCountOverride,
+// so a value persisted from a previous `create` isn't clobbered by the
+// flag's own built-in default on every subsequent run.
+func resolveDurationOverride(cmd *cobra.Command, flagName string) time.Duration {
+	if !cmd.Flags().Changed(flagName) {
+		return 0
+	}
+	value, err := cmd.Flags().GetDuration(flagName)
+	if err != nil {
+		logger.Warnf("failed to read %s flag: %v", flagName, err)
+		return 0
 	}
 	return value
 }
@@ -427,19 +451,20 @@ func runCreateCommand(cmd *cobra.Command, args []string) error {
 // Helper functions to call the appropriate managers
 func createMinikubeClusters(finalConfig *config.ProjectConfig, configManager *config.ConfigManager) error {
 	opts := &minikube.CreateOptions{
-		Project:          finalConfig.Project,
-		Bridge:           finalConfig.Bridge,
-		CPU:              finalConfig.CPU,
-		Memory:           finalConfig.Memory,
-		Disk:             finalConfig.DiskSize,
-		SubnetCIDR:       finalConfig.SubnetCIDR,
-		NumClusters:      finalConfig.NumClusters,
-		NodeCount:        finalConfig.NodeCount,
-		K8sVersion:       finalConfig.K8sVersion,
-		InstallMetalLB:   finalConfig.InstallMetalLB,
-		Verbose:          verbose,
-		CNI:              finalConfig.CNI,
-		ContainerRuntime: finalConfig.ContainerRuntime,
+		Project:               finalConfig.Project,
+		Bridge:                finalConfig.Bridge,
+		CPU:                   finalConfig.CPU,
+		Memory:                finalConfig.Memory,
+		Disk:                  finalConfig.DiskSize,
+		SubnetCIDR:            finalConfig.SubnetCIDR,
+		NumClusters:           finalConfig.NumClusters,
+		NodeCount:             finalConfig.NodeCount,
+		K8sVersion:            finalConfig.K8sVersion,
+		InstallMetalLB:        finalConfig.InstallMetalLB,
+		Verbose:               verbose,
+		CNI:                   finalConfig.CNI,
+		ContainerRuntime:      finalConfig.ContainerRuntime,
+		MetalLBInstallTimeout: finalConfig.MetalLBInstallTimeout,
 	}
 
 	manager := minikube.NewManager()
@@ -476,6 +501,8 @@ func createKindClusters(finalConfig *config.ProjectConfig, recreate bool, config
 		ContainerRuntime:         finalConfig.ContainerRuntime,
 		PreferredContainerEngine: finalConfig.ContainerEngine,
 		Recreate:                 recreate,
+		CiliumInstallTimeout:     finalConfig.CiliumInstallTimeout,
+		MetalLBInstallTimeout:    finalConfig.MetalLBInstallTimeout,
 	}
 
 	manager := kind.NewManager()
@@ -494,14 +521,16 @@ func createKindClusters(finalConfig *config.ProjectConfig, recreate bool, config
 
 func createNativeClusters(finalConfig *config.ProjectConfig, recreate bool, configManager *config.ConfigManager) error {
 	opts := &native.CreateOptions{
-		Project:        finalConfig.Project,
-		SubnetCIDR:     finalConfig.SubnetCIDR,
-		NumClusters:    finalConfig.NumClusters,
-		NodeCount:      finalConfig.NodeCount,
-		K8sVersion:     finalConfig.K8sVersion,
-		InstallMetalLB: finalConfig.InstallMetalLB,
-		CNI:            finalConfig.CNI,
-		Recreate:       recreate,
+		Project:               finalConfig.Project,
+		SubnetCIDR:            finalConfig.SubnetCIDR,
+		NumClusters:           finalConfig.NumClusters,
+		NodeCount:             finalConfig.NodeCount,
+		K8sVersion:            finalConfig.K8sVersion,
+		InstallMetalLB:        finalConfig.InstallMetalLB,
+		CNI:                   finalConfig.CNI,
+		Recreate:              recreate,
+		CiliumInstallTimeout:  finalConfig.CiliumInstallTimeout,
+		MetalLBInstallTimeout: finalConfig.MetalLBInstallTimeout,
 	}
 
 	manager, err := native.NewManager(finalConfig.NativeVMBackend)
@@ -924,6 +953,8 @@ func configCmd() *cobra.Command {
 			fmt.Printf("  Container Runtime: %s\n", projectConfig.ContainerRuntime)
 			fmt.Printf("  Install MetalLB: %v\n", projectConfig.InstallMetalLB)
 			fmt.Printf("  Install Cloud Provider: %v\n", projectConfig.InstallCloudProvider)
+			fmt.Printf("  Cilium Install Timeout: %v\n", projectConfig.CiliumInstallTimeout)
+			fmt.Printf("  MetalLB Install Timeout: %v\n", projectConfig.MetalLBInstallTimeout)
 			return nil
 		},
 	}

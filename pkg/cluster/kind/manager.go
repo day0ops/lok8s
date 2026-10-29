@@ -33,6 +33,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/day0ops/lok8s/pkg/config"
 	"github.com/day0ops/lok8s/pkg/logger"
@@ -69,6 +70,8 @@ type CreateOptions struct {
 	ContainerRuntime         string
 	PreferredContainerEngine string
 	Recreate                 bool
+	CiliumInstallTimeout     time.Duration
+	MetalLBInstallTimeout    time.Duration
 }
 
 // DeleteOptions contains options for deleting kind clusters
@@ -395,7 +398,7 @@ func (m *Manager) installLoadBalancer(clusterName, contextName string, clusterIn
 		}
 	}
 
-	if err := m.metallbManager.InstallMetalLBWithValues(contextName, nil); err != nil {
+	if err := m.metallbManager.InstallMetalLBWithValues(contextName, nil, opts.MetalLBInstallTimeout); err != nil {
 		return fmt.Errorf("failed to install MetalLB on %s: %w", contextName, err)
 	}
 
@@ -422,7 +425,7 @@ func (m *Manager) installCNI(contextName string, opts *CreateOptions) error {
 		return nil
 	}
 
-	if err := m.ciliumManager.InstallCiliumWithValues(contextName, nil); err != nil {
+	if err := m.ciliumManager.InstallCiliumWithValues(contextName, nil, opts.CiliumInstallTimeout); err != nil {
 		return fmt.Errorf("failed to install Cilium on %s: %w", contextName, err)
 	}
 

@@ -63,19 +63,20 @@ type Manager struct {
 
 // CreateOptions contains options for creating minikube clusters
 type CreateOptions struct {
-	Project          string
-	Bridge           string
-	CPU              string
-	Memory           string
-	Disk             string
-	SubnetCIDR       string
-	NumClusters      int
-	NodeCount        int
-	K8sVersion       string
-	InstallMetalLB   bool
-	Verbose          bool
-	CNI              string
-	ContainerRuntime string
+	Project               string
+	Bridge                string
+	CPU                   string
+	Memory                string
+	Disk                  string
+	SubnetCIDR            string
+	NumClusters           int
+	NodeCount             int
+	K8sVersion            string
+	InstallMetalLB        bool
+	Verbose               bool
+	CNI                   string
+	ContainerRuntime      string
+	MetalLBInstallTimeout time.Duration
 }
 
 // DeleteOptions contains options for deleting minikube clusters
@@ -217,7 +218,7 @@ func (m *Manager) installLoadBalancer(clusterName string, clusterIndex int, opts
 		logger.Warnf("failed to remove exclude-from-external-load-balancers label: %v", err)
 	}
 
-	if err := m.metallbManager.InstallMetalLBWithValues(clusterName, nil); err != nil {
+	if err := m.metallbManager.InstallMetalLBWithValues(clusterName, nil, opts.MetalLBInstallTimeout); err != nil {
 		return fmt.Errorf("failed to install MetalLB on %s: %w", clusterName, err)
 	}
 

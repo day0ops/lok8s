@@ -54,7 +54,7 @@ type MetalLBManager struct {
 // type, so tests can inject a fake that fails on demand.
 type MetalLBInstaller interface {
 	InitializeTracking(project string) error
-	InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}) error
+	InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}, timeout time.Duration) error
 	ConfigureMetalLB(clusterName, ip string, clusterNumber, totalClusters int, project string) error
 }
 
@@ -175,7 +175,8 @@ func (mm *MetalLBManager) SaveAllocation(project string, allocation *config.Meta
 // provider, which pins the controller to the control-plane node to avoid a
 // cross-node admission webhook call that hangs in that environment - adjust
 // the install without duplicating the repository-add/install/wait sequence.
-func (mm *MetalLBManager) InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}) error {
+// timeout bounds the Helm install's own readiness wait.
+func (mm *MetalLBManager) InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}, timeout time.Duration) error {
 	// pin to this cluster's context rather than the kubeconfig's shared,
 	// mutable current-context - see HelmManager.SetContext
 	mm.helmManager.SetContext(clusterName)
@@ -233,7 +234,7 @@ func (mm *MetalLBManager) InstallMetalLBWithValues(clusterName string, extraValu
 		values[k] = v
 	}
 
-	if err := mm.helmManager.InstallChart("metallb", "metallb/metallb", "metallb-system", values, 5*time.Minute); err != nil {
+	if err := mm.helmManager.InstallChart("metallb", "metallb/metallb", "metallb-system", values, timeout); err != nil {
 		status.End(false)
 		return fmt.Errorf("failed to install metallb chart: %w", err)
 	}

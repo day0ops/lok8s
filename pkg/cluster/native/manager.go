@@ -53,14 +53,16 @@ type Manager struct {
 
 // CreateOptions contains options for creating native clusters
 type CreateOptions struct {
-	Project        string
-	SubnetCIDR     string
-	NumClusters    int
-	NodeCount      int
-	K8sVersion     string
-	InstallMetalLB bool
-	CNI            string
-	Recreate       bool
+	Project               string
+	SubnetCIDR            string
+	NumClusters           int
+	NodeCount             int
+	K8sVersion            string
+	InstallMetalLB        bool
+	CNI                   string
+	Recreate              bool
+	CiliumInstallTimeout  time.Duration
+	MetalLBInstallTimeout time.Duration
 }
 
 // DeleteOptions contains options for deleting native clusters
@@ -247,7 +249,7 @@ func (m *Manager) installCNIAndLoadBalancer(contextName, cpIP string, clusterInd
 			"masquerade": true,
 		},
 	}
-	if err := m.ciliumManager.InstallCiliumWithValues(contextName, ciliumValues); err != nil {
+	if err := m.ciliumManager.InstallCiliumWithValues(contextName, ciliumValues, opts.CiliumInstallTimeout); err != nil {
 		return fmt.Errorf("failed to install Cilium on %s: %w", contextName, err)
 	}
 
@@ -281,7 +283,7 @@ func (m *Manager) installCNIAndLoadBalancer(contextName, cpIP string, clusterInd
 			},
 		},
 	}
-	if err := m.metallbManager.InstallMetalLBWithValues(contextName, metallbValues); err != nil {
+	if err := m.metallbManager.InstallMetalLBWithValues(contextName, metallbValues, opts.MetalLBInstallTimeout); err != nil {
 		return fmt.Errorf("failed to install MetalLB on %s: %w", contextName, err)
 	}
 	if err := m.metallbManager.ConfigureMetalLB(contextName, cpIP, clusterIndex, opts.NumClusters, opts.Project); err != nil {
