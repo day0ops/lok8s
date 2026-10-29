@@ -46,7 +46,7 @@ type CiliumManager struct {
 // this instead of the concrete type, so tests can inject a fake that fails on
 // demand.
 type CiliumInstaller interface {
-	InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error
+	InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}, timeout time.Duration) error
 }
 
 // BinaryManagerInterface defines the interface for binary management
@@ -67,7 +67,8 @@ func NewCiliumManager(helmManager *helm.HelmManager, binaryManager BinaryManager
 // that need a non-default install - e.g. the native provider, which disables
 // k3s's own kube-proxy in favor of Cilium's kube-proxy replacement - adjust
 // the install without duplicating the repository-add/install/wait sequence.
-func (cm *CiliumManager) InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error {
+// timeout bounds the Helm install's own readiness wait.
+func (cm *CiliumManager) InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}, timeout time.Duration) error {
 	// pin to this cluster's context rather than the kubeconfig's shared,
 	// mutable current-context - see HelmManager.SetContext
 	cm.helmManager.SetContext(clusterName)
@@ -100,7 +101,7 @@ func (cm *CiliumManager) InstallCiliumWithValues(clusterName string, extraValues
 		values[k] = v
 	}
 
-	if err := cm.helmManager.InstallChart("cilium", "cilium/cilium", "kube-system", values, 5*time.Minute); err != nil {
+	if err := cm.helmManager.InstallChart("cilium", "cilium/cilium", "kube-system", values, timeout); err != nil {
 		status.End(false)
 		return fmt.Errorf("failed to install cilium chart: %w", err)
 	}

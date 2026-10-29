@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/day0ops/lok8s/pkg/logger"
 	"gopkg.in/yaml.v3"
@@ -63,6 +64,10 @@ type ProjectConfig struct {
 	InstallMetalLB       bool `yaml:"install_metallb"`
 	InstallCloudProvider bool `yaml:"install_cloud_provider"`
 	SkipMetalLB          bool `yaml:"skip_metallb"`
+
+	// Helm install timeouts
+	CiliumInstallTimeout  time.Duration `yaml:"cilium_install_timeout"`
+	MetalLBInstallTimeout time.Duration `yaml:"metallb_install_timeout"`
 
 	// MetalLB IP allocation tracking
 	MetalLBAllocations []MetalLBAllocation `yaml:"metallb_allocations,omitempty"`
@@ -268,6 +273,12 @@ func MergeConfigs(base, override *ProjectConfig) *ProjectConfig {
 	if override.NativeVMBackend != "" {
 		merged.NativeVMBackend = override.NativeVMBackend
 	}
+	if override.CiliumInstallTimeout > 0 {
+		merged.CiliumInstallTimeout = override.CiliumInstallTimeout
+	}
+	if override.MetalLBInstallTimeout > 0 {
+		merged.MetalLBInstallTimeout = override.MetalLBInstallTimeout
+	}
 
 	// boolean flags are always overridden
 	merged.InstallMetalLB = override.InstallMetalLB
@@ -289,6 +300,12 @@ func (cm *ConfigManager) MergeConfig(project string, cmdConfig *ProjectConfig) (
 	if savedConfig == nil {
 		if cmdConfig.NodeCount < 0 {
 			cmdConfig.NodeCount = DefaultNodeCount
+		}
+		if cmdConfig.CiliumInstallTimeout <= 0 {
+			cmdConfig.CiliumInstallTimeout = DefaultCiliumInstallTimeout
+		}
+		if cmdConfig.MetalLBInstallTimeout <= 0 {
+			cmdConfig.MetalLBInstallTimeout = DefaultMetalLBInstallTimeout
 		}
 		return cmdConfig, nil
 	}
@@ -345,11 +362,25 @@ func (cm *ConfigManager) MergeConfig(project string, cmdConfig *ProjectConfig) (
 	if cmdConfig.NativeVMBackend != "" {
 		mergedConfig.NativeVMBackend = cmdConfig.NativeVMBackend
 	}
+	if cmdConfig.CiliumInstallTimeout > 0 {
+		mergedConfig.CiliumInstallTimeout = cmdConfig.CiliumInstallTimeout
+	}
+	if cmdConfig.MetalLBInstallTimeout > 0 {
+		mergedConfig.MetalLBInstallTimeout = cmdConfig.MetalLBInstallTimeout
+	}
 
 	// boolean flags are always overridden by command line
 	mergedConfig.InstallMetalLB = cmdConfig.InstallMetalLB
 	mergedConfig.InstallCloudProvider = cmdConfig.InstallCloudProvider
 	mergedConfig.SkipMetalLB = cmdConfig.SkipMetalLB
+
+	// backfill defaults for saved configs predating these fields
+	if mergedConfig.CiliumInstallTimeout <= 0 {
+		mergedConfig.CiliumInstallTimeout = DefaultCiliumInstallTimeout
+	}
+	if mergedConfig.MetalLBInstallTimeout <= 0 {
+		mergedConfig.MetalLBInstallTimeout = DefaultMetalLBInstallTimeout
+	}
 
 	return &mergedConfig, nil
 }

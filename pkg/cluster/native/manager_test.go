@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -39,7 +40,7 @@ type fakeCiliumInstaller struct {
 	receivedValues map[string]interface{}
 }
 
-func (f *fakeCiliumInstaller) InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}) error {
+func (f *fakeCiliumInstaller) InstallCiliumWithValues(clusterName string, extraValues map[string]interface{}, timeout time.Duration) error {
 	f.installCalled = true
 	f.receivedValues = extraValues
 	return f.installErr
@@ -58,7 +59,7 @@ func (f *fakeMetalLBInstaller) InitializeTracking(project string) error {
 	return f.initErr
 }
 
-func (f *fakeMetalLBInstaller) InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}) error {
+func (f *fakeMetalLBInstaller) InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}, timeout time.Duration) error {
 	f.installCalled = true
 	return f.installErr
 }

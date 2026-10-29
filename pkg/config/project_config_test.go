@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -301,44 +302,48 @@ invalid: yaml: content: [`
 
 			BeforeEach(func() {
 				base = &ProjectConfig{
-					Project:              "base-project",
-					Environment:          "kind",
-					NumClusters:          1,
-					NodeCount:            2,
-					K8sVersion:           "v1.27.0",
-					GatewayIP:            "10.89.0.1",
-					SubnetCIDR:           "10.89.0.0/16",
-					Bridge:               "virbr50",
-					CPU:                  "2",
-					Memory:               "4GiB",
-					DiskSize:             "5GiB",
-					CNI:                  "calico",
-					ContainerRuntime:     "docker",
-					InstallMetalLB:       true,
-					InstallCloudProvider: false,
-					SkipMetalLB:          false,
+					Project:               "base-project",
+					Environment:           "kind",
+					NumClusters:           1,
+					NodeCount:             2,
+					K8sVersion:            "v1.27.0",
+					GatewayIP:             "10.89.0.1",
+					SubnetCIDR:            "10.89.0.0/16",
+					Bridge:                "virbr50",
+					CPU:                   "2",
+					Memory:                "4GiB",
+					DiskSize:              "5GiB",
+					CNI:                   "calico",
+					ContainerRuntime:      "docker",
+					InstallMetalLB:        true,
+					InstallCloudProvider:  false,
+					SkipMetalLB:           false,
+					CiliumInstallTimeout:  5 * time.Minute,
+					MetalLBInstallTimeout: 5 * time.Minute,
 				}
 			})
 
 			Context("Complete override", func() {
 				BeforeEach(func() {
 					override = &ProjectConfig{
-						Project:              "override-project",
-						Environment:          "minikube",
-						NumClusters:          3,
-						NodeCount:            4,
-						K8sVersion:           "v1.28.0",
-						GatewayIP:            "10.100.0.1",
-						SubnetCIDR:           "10.100.0.0/16",
-						Bridge:               "virbr100",
-						CPU:                  "8",
-						Memory:               "16GiB",
-						DiskSize:             "20GiB",
-						CNI:                  "cilium",
-						ContainerRuntime:     "containerd",
-						InstallMetalLB:       false,
-						InstallCloudProvider: true,
-						SkipMetalLB:          true,
+						Project:               "override-project",
+						Environment:           "minikube",
+						NumClusters:           3,
+						NodeCount:             4,
+						K8sVersion:            "v1.28.0",
+						GatewayIP:             "10.100.0.1",
+						SubnetCIDR:            "10.100.0.0/16",
+						Bridge:                "virbr100",
+						CPU:                   "8",
+						Memory:                "16GiB",
+						DiskSize:              "20GiB",
+						CNI:                   "cilium",
+						ContainerRuntime:      "containerd",
+						InstallMetalLB:        false,
+						InstallCloudProvider:  true,
+						SkipMetalLB:           true,
+						CiliumInstallTimeout:  10 * time.Minute,
+						MetalLBInstallTimeout: 15 * time.Minute,
 					}
 				})
 
@@ -361,6 +366,8 @@ invalid: yaml: content: [`
 					Expect(merged.InstallMetalLB).To(Equal(override.InstallMetalLB))
 					Expect(merged.InstallCloudProvider).To(Equal(override.InstallCloudProvider))
 					Expect(merged.SkipMetalLB).To(Equal(override.SkipMetalLB))
+					Expect(merged.CiliumInstallTimeout).To(Equal(override.CiliumInstallTimeout))
+					Expect(merged.MetalLBInstallTimeout).To(Equal(override.MetalLBInstallTimeout))
 				})
 			})
 
@@ -405,6 +412,8 @@ invalid: yaml: content: [`
 					Expect(merged.Memory).To(Equal(base.Memory))
 					Expect(merged.DiskSize).To(Equal(base.DiskSize))
 					Expect(merged.ContainerRuntime).To(Equal(base.ContainerRuntime))
+					Expect(merged.CiliumInstallTimeout).To(Equal(base.CiliumInstallTimeout))
+					Expect(merged.MetalLBInstallTimeout).To(Equal(base.MetalLBInstallTimeout))
 
 					// Boolean fields are always overridden
 					Expect(merged.InstallMetalLB).To(Equal(override.InstallMetalLB))
@@ -576,6 +585,65 @@ invalid: yaml: content: [`
 				mergedConfig, err := cm.MergeConfig(project, cmdConfig)
 				Expect(err).NotTo(HaveOccurred())
 				Expect(mergedConfig.NodeCount).To(Equal(DefaultNodeCount))
+			})
+
+			It("should resolve install timeouts to the package defaults when not specified and no saved config exists", func() {
+				project := "new-project-default-timeouts"
+
+				// --cilium-install-timeout/--metallb-install-timeout not
+				// passed on a brand new project: the CLI layer represents
+				// this as the zero value (0s)
+				cmdConfig := &ProjectConfig{
+					Project: project,
+				}
+
+				mergedConfig, err := cm.MergeConfig(project, cmdConfig)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(mergedConfig.CiliumInstallTimeout).To(Equal(DefaultCiliumInstallTimeout))
+				Expect(mergedConfig.MetalLBInstallTimeout).To(Equal(DefaultMetalLBInstallTimeout))
+			})
+
+			It("should persist a previously-set install timeout when not overridden on a later run", func() {
+				project := "test-project-persisted-timeout"
+
+				savedConfig := &ProjectConfig{
+					Project:               project,
+					CiliumInstallTimeout:  15 * time.Minute,
+					MetalLBInstallTimeout: 10 * time.Minute,
+				}
+				err := cm.SaveConfig(project, savedConfig)
+				Expect(err).NotTo(HaveOccurred())
+
+				// flags not passed on this run: the CLI layer represents
+				// this as the zero value (0s), same as resolveDurationOverride
+				cmdConfig := &ProjectConfig{
+					Project: project,
+				}
+
+				mergedConfig, err := cm.MergeConfig(project, cmdConfig)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(mergedConfig.CiliumInstallTimeout).To(Equal(15 * time.Minute))
+				Expect(mergedConfig.MetalLBInstallTimeout).To(Equal(10 * time.Minute))
+			})
+
+			It("should override a previously-set install timeout when explicitly passed on a later run", func() {
+				project := "test-project-override-timeout"
+
+				savedConfig := &ProjectConfig{
+					Project:              project,
+					CiliumInstallTimeout: 15 * time.Minute,
+				}
+				err := cm.SaveConfig(project, savedConfig)
+				Expect(err).NotTo(HaveOccurred())
+
+				cmdConfig := &ProjectConfig{
+					Project:              project,
+					CiliumInstallTimeout: 20 * time.Minute,
+				}
+
+				mergedConfig, err := cm.MergeConfig(project, cmdConfig)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(mergedConfig.CiliumInstallTimeout).To(Equal(20 * time.Minute))
 			})
 		})
 	})

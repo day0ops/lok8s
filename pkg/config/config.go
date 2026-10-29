@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
@@ -62,6 +63,10 @@ const (
 	// MetalLB defaults
 	MetalLBRangeMinLastOctet = 200
 	MetalLBRangeMaxLastOctet = 254
+
+	// Helm install timeouts
+	DefaultCiliumInstallTimeout  = 5 * time.Minute
+	DefaultMetalLBInstallTimeout = 5 * time.Minute
 
 	// vfkit minimum supported version (macOS)
 	VfkitMinSupportedVersion = "0.6.1"

@@ -24,6 +24,7 @@ package minikube
 
 import (
 	"errors"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -48,7 +49,7 @@ type fakeMetalLBInstaller struct {
 
 func (f *fakeMetalLBInstaller) InitializeTracking(project string) error { return nil }
 
-func (f *fakeMetalLBInstaller) InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}) error {
+func (f *fakeMetalLBInstaller) InstallMetalLBWithValues(clusterName string, extraValues map[string]interface{}, timeout time.Duration) error {
 	f.installCalled = true
 	return f.installErr
 }
